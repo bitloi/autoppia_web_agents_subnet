@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
 import time
 import queue
 import os
@@ -14,6 +13,7 @@ from autoppia_web_agents_subnet.base.validator import BaseValidatorNeuron
 from autoppia_web_agents_subnet.bittensor_config import config
 from autoppia_web_agents_subnet.validator.config import (
     ROUND_SIZE_EPOCHS,
+    BURN_UID,
 )
 from autoppia_web_agents_subnet.validator.round_manager import RoundManager, RoundPhase
 from autoppia_web_agents_subnet.validator.season_manager import SeasonManager
@@ -70,17 +70,8 @@ class Validator(
         bt.logging.info("load_state()")
         self.load_state()
 
-    def _competition_state_path(self) -> Path:
-        """Path where season competition state is persisted."""
-        try:
-            full_path = Path(str(self.config.neuron.full_path))
-        except Exception:
-            full_path = Path(".")
-        full_path.mkdir(parents=True, exist_ok=True)
-        return full_path / "season_competition_state.json"
-
     def _state_summary_root(self) -> Path:
-        """Root path for per-round summary snapshots."""
+        """Root path for validator local season/round artifacts."""
         root = os.getenv("IWAP_BACKUP_DIR")
         if root:
             base = Path(root)
@@ -93,13 +84,21 @@ class Validator(
         base.mkdir(parents=True, exist_ok=True)
         return base
 
+    def _season_dir_path(self, season_number: int) -> Path:
+        season_dir = self._state_summary_root() / f"season_{int(season_number)}"
+        season_dir.mkdir(parents=True, exist_ok=True)
+        return season_dir
+
+    def _round_dir_path(self, season_number: int, round_number: int) -> Path:
+        round_dir = self._season_dir_path(season_number) / f"round_{int(round_number)}"
+        round_dir.mkdir(parents=True, exist_ok=True)
+        return round_dir
+
     def _save_competition_state(self) -> None:
-        """Persist season winner/history state to JSON (best-effort)."""
+        """Persist canonical post-consensus artifacts under season/round folders."""
         state = getattr(self, "_season_competition_history", None)
         if not isinstance(state, dict):
             return
-
-        serialized: dict[str, dict] = {}
         for season, season_data in state.items():
             try:
                 season_i = int(season)
@@ -107,8 +106,6 @@ class Validator(
                 continue
             if not isinstance(season_data, dict):
                 continue
-
-            rounds_out: dict[str, dict] = {}
             rounds_in = season_data.get("rounds", {})
             if isinstance(rounds_in, dict):
                 for round_key, round_data in rounds_in.items():
@@ -118,223 +115,24 @@ class Validator(
                         continue
                     if not isinstance(round_data, dict):
                         continue
-
-                    winner_in = round_data.get("winner", {})
-                    winner_uid = None
-                    winner_reward = 0.0
-                    if isinstance(winner_in, dict):
-                        raw_uid = winner_in.get("miner_uid")
-                        try:
-                            winner_uid = int(raw_uid) if raw_uid is not None else None
-                        except Exception:
-                            winner_uid = None
-                        try:
-                            winner_reward = float(winner_in.get("reward", winner_in.get("score", 0.0)) or 0.0)
-                        except Exception:
-                            winner_reward = 0.0
-
-                    miner_rewards_out: dict[str, float] = {}
-                    miner_rewards_in = round_data.get("miner_rewards", round_data.get("miner_scores", {}))
-                    if isinstance(miner_rewards_in, dict):
-                        for uid, reward in miner_rewards_in.items():
-                            try:
-                                uid_i = int(uid)
-                                reward_f = float(reward)
-                            except Exception:
-                                continue
-                            miner_rewards_out[str(uid_i)] = reward_f
-
-                    decision_out = {}
-                    decision_in = round_data.get("decision", {})
-                    if isinstance(decision_in, dict):
-                        for key in (
-                            "top_candidate_uid",
-                            "top_candidate_reward",
-                            "reigning_uid_before_round",
-                            "reigning_reward_before_round",
-                            "reigning_eligible_before_round",
-                            "required_improvement_pct",
-                            "required_reward_to_dethrone",
-                            "dethroned",
-                            "eligible_uids",
-                        ):
-                            if key in decision_in:
-                                decision_out[key] = decision_in[key]
-
-                    round_out = {
-                        "winner": {
-                            "miner_uid": winner_uid,
-                            "reward": winner_reward,
-                        },
-                        "miner_rewards": miner_rewards_out,
-                    }
                     post_consensus_json_in = round_data.get("post_consensus_json")
                     if isinstance(post_consensus_json_in, dict):
-                        round_out["post_consensus_json"] = dict(post_consensus_json_in)
-                    if decision_out:
-                        round_out["decision"] = decision_out
-                    rounds_out[str(round_i)] = round_out
-
-            summary_in = season_data.get("summary", {})
-            if not isinstance(summary_in, dict):
-                summary_in = {}
-
-            best_by_miner_out: dict[str, float] = {}
-            best_by_miner_in = summary_in.get("best_by_miner", {})
-            if isinstance(best_by_miner_in, dict):
-                for uid, reward in best_by_miner_in.items():
-                    try:
-                        uid_i = int(uid)
-                        reward_f = float(reward)
-                    except Exception:
-                        continue
-                    best_by_miner_out[str(uid_i)] = reward_f
-
-            best_round_by_miner_out: dict[str, int] = {}
-            best_round_by_miner_in = summary_in.get("best_round_by_miner", {})
-            if isinstance(best_round_by_miner_in, dict):
-                for uid, rnd in best_round_by_miner_in.items():
-                    try:
-                        uid_i = int(uid)
-                        rnd_i = int(rnd)
-                    except Exception:
-                        continue
-                    best_round_by_miner_out[str(uid_i)] = rnd_i
-
-            current_winner_uid = summary_in.get("current_winner_uid")
-            try:
-                current_winner_uid = int(current_winner_uid) if current_winner_uid is not None else None
-            except Exception:
-                current_winner_uid = None
-
-            summary_out = {
-                "current_winner_uid": current_winner_uid,
-                "current_winner_reward": float(summary_in.get("current_winner_reward", summary_in.get("current_winner_score", 0.0)) or 0.0),
-                "required_improvement_pct": float(summary_in.get("required_improvement_pct", 0.0) or 0.0),
-                "best_by_miner": best_by_miner_out,
-                "best_round_by_miner": best_round_by_miner_out,
-                "last_eligible_uids": [int(uid) for uid in (summary_in.get("last_eligible_uids", []) or []) if uid is not None],
-            }
-            current_winner_snapshot_in = summary_in.get("current_winner_snapshot")
-            if isinstance(current_winner_snapshot_in, dict):
-                summary_out["current_winner_snapshot"] = dict(current_winner_snapshot_in)
-            best_snapshot_by_miner_in = summary_in.get("best_snapshot_by_miner", {})
-            if isinstance(best_snapshot_by_miner_in, dict):
-                best_snapshot_by_miner_out: dict[str, dict] = {}
-                for uid, snapshot in best_snapshot_by_miner_in.items():
-                    try:
-                        uid_i = int(uid)
-                    except Exception:
-                        continue
-                    if isinstance(snapshot, dict):
-                        best_snapshot_by_miner_out[str(uid_i)] = dict(snapshot)
-                if best_snapshot_by_miner_out:
-                    summary_out["best_snapshot_by_miner"] = best_snapshot_by_miner_out
-
-            serialized[str(season_i)] = {
-                "rounds": rounds_out,
-                "summary": summary_out,
-            }
-
-        payload = {
-            "schema_version": 1,
-            "seasons": serialized,
-        }
-        with self._competition_state_path().open("w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, sort_keys=True)
-
-        self._save_round_summary_snapshots(serialized)
-
-    def _save_round_summary_snapshots(self, serialized: dict[str, dict]) -> None:
-        """Persist per-round summary snapshots under data/season_<N>/round_<M>/summary_round.json."""
-        try:
-            base = self._state_summary_root()
-        except Exception:
-            return
-
-        now = datetime.utcnow().isoformat()
-
-        for season_key, season_payload in serialized.items():
-            try:
-                season_number = int(season_key)
-            except Exception:
-                continue
-            if not isinstance(season_payload, dict):
-                continue
-
-            season_summary = season_payload.get("summary", {})
-            if not isinstance(season_summary, dict):
-                season_summary = {}
-
-            rounds_payload = season_payload.get("rounds", {})
-            if not isinstance(rounds_payload, dict):
-                continue
-
-            season_dir = base / f"season_{season_number}"
-            for round_key, round_payload in rounds_payload.items():
-                try:
-                    round_number = int(round_key)
-                except Exception:
-                    continue
-                if not isinstance(round_payload, dict):
-                    continue
-                round_dir = season_dir / f"round_{round_number}"
-                logs_dir = round_dir / "logs"
-                if not logs_dir.exists():
-                    round_dir.mkdir(parents=True, exist_ok=True)
-                summary_path = round_dir / "summary_round.json"
-                round_summary = {**round_payload}
-
-                snapshot = {
-                    "schema_version": 1,
-                    "season_number": season_number,
-                    "round_number_in_season": round_number,
-                    "saved_at_utc": now,
-                    "post_consensus": None,
-                    "ipfs_uploaded": None,
-                    "ipfs_downloaded": None,
-                    "round_summary": {
-                        "winner": round_summary.get("winner", {}),
-                        "miner_rewards": {str(k): float(v) for k, v in round_summary.get("miner_rewards", round_summary.get("miner_scores", {})).items()}
-                        if isinstance(round_summary.get("miner_rewards", round_summary.get("miner_scores", {})), dict)
-                        else {},
-                        "decision": round_summary.get("decision", {}),
-                    },
-                    "season_summary": {
-                        "current_winner_uid": season_summary.get("current_winner_uid"),
-                        "current_winner_reward": season_summary.get("current_winner_reward", season_summary.get("current_winner_score", 0.0)),
-                        "required_improvement_pct": season_summary.get("required_improvement_pct", 0.0),
-                        "last_eligible_uids": season_summary.get("last_eligible_uids", []) or [],
-                    },
-                }
-                with summary_path.open("w", encoding="utf-8") as f:
-                    json.dump(snapshot, f, indent=2, sort_keys=True)
+                        round_dir = self._round_dir_path(season_i, round_i)
+                        target = round_dir / "post_consensus.json"
+                        with target.open("w", encoding="utf-8") as f:
+                            json.dump(post_consensus_json_in, f, indent=2, sort_keys=True)
 
     def _load_competition_state(self) -> None:
-        """Load season winner/history state from JSON (best-effort)."""
-        path = self._competition_state_path()
-        if not path.exists():
-            return
-
-        with path.open("r", encoding="utf-8") as f:
-            payload = json.load(f)
-
-        seasons_in = payload.get("seasons", {})
-        if not isinstance(seasons_in, dict):
-            return
-
+        """Rebuild season competition history from saved round post_consensus artifacts."""
         loaded: dict[int, dict] = {}
-        for season_key, season_data in seasons_in.items():
+        base = self._state_summary_root()
+        for season_dir in sorted(base.glob("season_*")):
+            if not season_dir.is_dir():
+                continue
             try:
-                season_i = int(season_key)
+                season_i = int(str(season_dir.name).split("_", 1)[1])
             except Exception:
                 continue
-            if not isinstance(season_data, dict):
-                continue
-
-            # New shape:
-            # seasons.<s>.rounds.<r>.{winner, miner_rewards}
-            # seasons.<s>.summary.{current_winner_uid, current_winner_reward, best_by_miner, ...}
             rounds_loaded: dict[int, dict] = {}
             summary_loaded: dict = {
                 "current_winner_uid": None,
@@ -342,169 +140,78 @@ class Validator(
                 "required_improvement_pct": 0.0,
                 "best_by_miner": {},
                 "best_round_by_miner": {},
+                "best_snapshot_by_miner": {},
                 "last_eligible_uids": [],
             }
-
-            if "rounds" in season_data or "summary" in season_data:
-                rounds_in = season_data.get("rounds", {})
-                if isinstance(rounds_in, dict):
-                    for round_key, round_data in rounds_in.items():
-                        try:
-                            round_i = int(round_key)
-                        except Exception:
-                            continue
-                        if not isinstance(round_data, dict):
-                            continue
-
-                        winner_in = round_data.get("winner", {})
-                        winner_uid = None
-                        winner_reward = 0.0
-                        if isinstance(winner_in, dict):
-                            raw_uid = winner_in.get("miner_uid")
-                            try:
-                                winner_uid = int(raw_uid) if raw_uid is not None else None
-                            except Exception:
-                                winner_uid = None
-                            try:
-                                winner_reward = float(winner_in.get("reward", winner_in.get("score", 0.0)) or 0.0)
-                            except Exception:
-                                winner_reward = 0.0
-
-                        miner_rewards_loaded: dict[int, float] = {}
-                        miner_rewards_in = round_data.get("miner_rewards", round_data.get("miner_scores", {}))
-                        if isinstance(miner_rewards_in, dict):
-                            for uid_key, reward in miner_rewards_in.items():
-                                try:
-                                    uid_i = int(uid_key)
-                                    reward_f = float(reward)
-                                except Exception:
-                                    continue
-                                miner_rewards_loaded[uid_i] = reward_f
-
-                        round_out = {
-                            "winner": {"miner_uid": winner_uid, "reward": winner_reward},
-                            "miner_rewards": miner_rewards_loaded,
-                        }
-                        post_consensus_json_in = round_data.get("post_consensus_json")
-                        if isinstance(post_consensus_json_in, dict):
-                            round_out["post_consensus_json"] = dict(post_consensus_json_in)
-                        decision_in = round_data.get("decision", {})
-                        if isinstance(decision_in, dict):
-                            round_out["decision"] = dict(decision_in)
-                        rounds_loaded[round_i] = round_out
-
-                summary_in = season_data.get("summary", {})
-                if isinstance(summary_in, dict):
-                    current_winner_uid = summary_in.get("current_winner_uid")
-                    try:
-                        current_winner_uid = int(current_winner_uid) if current_winner_uid is not None else None
-                    except Exception:
-                        current_winner_uid = None
-
-                    best_by_miner_loaded: dict[int, float] = {}
-                    for uid_key, reward in (summary_in.get("best_by_miner", {}) or {}).items():
-                        try:
-                            uid_i = int(uid_key)
-                            reward_f = float(reward)
-                        except Exception:
-                            continue
-                        best_by_miner_loaded[uid_i] = reward_f
-
-                    best_round_by_miner_loaded: dict[int, int] = {}
-                    for uid_key, rnd in (summary_in.get("best_round_by_miner", {}) or {}).items():
-                        try:
-                            uid_i = int(uid_key)
-                            rnd_i = int(rnd)
-                        except Exception:
-                            continue
-                        best_round_by_miner_loaded[uid_i] = rnd_i
-
-                    summary_loaded = {
-                        "current_winner_uid": current_winner_uid,
-                        "current_winner_reward": float(summary_in.get("current_winner_reward", summary_in.get("current_winner_score", 0.0)) or 0.0),
-                        "required_improvement_pct": float(summary_in.get("required_improvement_pct", 0.0) or 0.0),
-                        "best_by_miner": best_by_miner_loaded,
-                        "best_round_by_miner": best_round_by_miner_loaded,
-                        "last_eligible_uids": [int(uid) for uid in (summary_in.get("last_eligible_uids", []) or []) if uid is not None],
-                    }
-                    current_winner_snapshot = summary_in.get("current_winner_snapshot")
-                    if isinstance(current_winner_snapshot, dict):
-                        summary_loaded["current_winner_snapshot"] = dict(current_winner_snapshot)
-
-                    best_snapshot_by_miner_loaded: dict[int, dict] = {}
-                    for uid_key, snapshot in (summary_in.get("best_snapshot_by_miner", {}) or {}).items():
-                        try:
-                            uid_i = int(uid_key)
-                        except Exception:
-                            continue
-                        if isinstance(snapshot, dict):
-                            best_snapshot_by_miner_loaded[uid_i] = dict(snapshot)
-                    if best_snapshot_by_miner_loaded:
-                        summary_loaded["best_snapshot_by_miner"] = best_snapshot_by_miner_loaded
-            else:
-                # Backward compatibility for old shape:
-                # seasons.<s>.miners + seasons.<s>.round_winners
-                miners_in = season_data.get("miners", {})
-                if isinstance(miners_in, dict):
-                    for uid_key, miner_data in miners_in.items():
-                        try:
-                            uid_i = int(uid_key)
-                        except Exception:
-                            continue
-                        if not isinstance(miner_data, dict):
-                            continue
-                        best_score = float(miner_data.get("best_score", 0.0) or 0.0)
-                        best_round = int(miner_data.get("best_round", 0) or 0)
-                        summary_loaded["best_by_miner"][uid_i] = best_score
-                        if best_round > 0:
-                            summary_loaded["best_round_by_miner"][uid_i] = best_round
-                        round_scores = miner_data.get("round_scores", {})
-                        if isinstance(round_scores, dict):
-                            for rnd_key, reward in round_scores.items():
-                                try:
-                                    rnd_i = int(rnd_key)
-                                    reward_f = float(reward)
-                                except Exception:
-                                    continue
-                                entry = rounds_loaded.get(rnd_i)
-                                if not isinstance(entry, dict):
-                                    entry = {"winner": {"miner_uid": None, "reward": 0.0}, "miner_rewards": {}}
-                                entry["miner_rewards"][uid_i] = reward_f
-                                rounds_loaded[rnd_i] = entry
-
-                winners_in = season_data.get("round_winners", [])
-                if isinstance(winners_in, list):
-                    for winner in winners_in:
-                        if not isinstance(winner, dict):
-                            continue
-                        try:
-                            rnd_i = int(winner.get("round", 0) or 0)
-                        except Exception:
-                            continue
-                        if rnd_i <= 0:
-                            continue
-                        entry = rounds_loaded.get(rnd_i)
-                        if not isinstance(entry, dict):
-                            entry = {"winner": {"miner_uid": None, "reward": 0.0}, "miner_rewards": {}}
-                        raw_uid = winner.get("winner_uid")
-                        try:
-                            winner_uid = int(raw_uid) if raw_uid is not None else None
-                        except Exception:
-                            winner_uid = None
-                        entry["winner"] = {
-                            "miner_uid": winner_uid,
-                            "reward": float(winner.get("winner_reward", winner.get("winner_score", 0.0)) or 0.0),
-                        }
-                        rounds_loaded[rnd_i] = entry
-
-                current_winner_uid = season_data.get("current_winner_uid")
+            for round_dir in sorted(season_dir.glob("round_*")):
+                if not round_dir.is_dir():
+                    continue
                 try:
-                    current_winner_uid = int(current_winner_uid) if current_winner_uid is not None else None
+                    round_i = int(str(round_dir.name).split("_", 1)[1])
                 except Exception:
-                    current_winner_uid = None
-                summary_loaded["current_winner_uid"] = current_winner_uid
-                summary_loaded["current_winner_reward"] = float(season_data.get("current_winner_reward", season_data.get("current_winner_score", 0.0)) or 0.0)
-                summary_loaded["required_improvement_pct"] = float(season_data.get("required_improvement_pct", 0.0) or 0.0)
+                    continue
+                post_consensus_path = round_dir / "post_consensus.json"
+                if not post_consensus_path.exists():
+                    continue
+                try:
+                    with post_consensus_path.open("r", encoding="utf-8") as f:
+                        post_consensus_json = json.load(f)
+                except Exception:
+                    continue
+                if not isinstance(post_consensus_json, dict):
+                    continue
+
+                rounds_loaded[round_i] = {"post_consensus_json": dict(post_consensus_json)}
+
+                miners = post_consensus_json.get("miners", [])
+                if isinstance(miners, list):
+                    eligible_uids: list[int] = []
+                    for miner_entry in miners:
+                        if not isinstance(miner_entry, dict):
+                            continue
+                        try:
+                            uid_i = int(miner_entry.get("uid"))
+                        except Exception:
+                            continue
+                        if uid_i != int(BURN_UID):
+                            eligible_uids.append(uid_i)
+                        best_run = miner_entry.get("best_run_consensus")
+                        if not isinstance(best_run, dict):
+                            continue
+                        try:
+                            reward_f = float(best_run.get("reward", 0.0) or 0.0)
+                        except Exception:
+                            reward_f = 0.0
+                        current_best = float(summary_loaded["best_by_miner"].get(uid_i, float("-inf")) or float("-inf"))
+                        if reward_f >= current_best:
+                            summary_loaded["best_by_miner"][uid_i] = reward_f
+                            summary_loaded["best_round_by_miner"][uid_i] = round_i
+                            summary_loaded["best_snapshot_by_miner"][uid_i] = {
+                                "uid": uid_i,
+                                "reward": reward_f,
+                                "score": float(best_run.get("score", 0.0) or 0.0),
+                                "time": float(best_run.get("time", 0.0) or 0.0),
+                                "cost": float(best_run.get("cost", 0.0) or 0.0),
+                            }
+                    summary_loaded["last_eligible_uids"] = sorted(set(eligible_uids))
+
+                summary = post_consensus_json.get("summary")
+                if isinstance(summary, dict):
+                    leader_after = summary.get("leader_after_round")
+                    if isinstance(leader_after, dict):
+                        try:
+                            summary_loaded["current_winner_uid"] = int(leader_after.get("uid")) if leader_after.get("uid") is not None else None
+                        except Exception:
+                            summary_loaded["current_winner_uid"] = None
+                        try:
+                            summary_loaded["current_winner_reward"] = float(leader_after.get("reward", 0.0) or 0.0)
+                        except Exception:
+                            summary_loaded["current_winner_reward"] = 0.0
+                        summary_loaded["current_winner_snapshot"] = {k: v for k, v in dict(leader_after).items() if k != "weight"}
+                    try:
+                        summary_loaded["required_improvement_pct"] = float(summary.get("percentage_to_dethrone", 0.0) or 0.0)
+                    except Exception:
+                        summary_loaded["required_improvement_pct"] = 0.0
 
             loaded[season_i] = {
                 "rounds": rounds_loaded,
@@ -514,7 +221,7 @@ class Validator(
         self._season_competition_history = loaded
 
     def save_state(self):
-        """Save base validator state + season competition history."""
+        """Save base validator state + season/round artifacts."""
         super().save_state()
         try:
             self._save_competition_state()
@@ -522,7 +229,7 @@ class Validator(
             bt.logging.warning(f"Failed to save competition state: {exc}")
 
     def load_state(self):
-        """Load base validator state + season competition history + IWAP prev-round (for is_reused)."""
+        """Load base validator state + season/round artifacts."""
         try:
             super().load_state()
         except Exception as exc:
@@ -530,12 +237,7 @@ class Validator(
         try:
             self._load_competition_state()
         except Exception as exc:
-            bt.logging.warning(f"Could not load competition state JSON (starting fresh): {exc}")
-        try:
-            if hasattr(self, "_load_iwap_prev_round_state") and callable(self._load_iwap_prev_round_state):
-                self._load_iwap_prev_round_state()
-        except Exception as exc:
-            bt.logging.warning(f"Could not load IWAP prev-round state (starting fresh): {exc}")
+            bt.logging.warning(f"Could not load season/round artifacts (starting fresh): {exc}")
 
     async def forward(self) -> None:
         """

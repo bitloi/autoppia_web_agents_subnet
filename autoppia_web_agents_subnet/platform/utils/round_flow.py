@@ -264,30 +264,6 @@ def _load_validator_state_json(ctx) -> Optional[Dict[str, Any]]:
         return {"error": str(exc)}
 
 
-def _load_validator_iwap_prev_round_json(ctx) -> Optional[Dict[str, Any]]:
-    """Read validator local iwap_prev_round.json and return parsed JSON."""
-    try:
-        path_getter = getattr(ctx, "_iwap_prev_round_path", None)
-        if callable(path_getter):
-            prev_path = Path(path_getter())
-        else:
-            full_path = Path(str(getattr(ctx.config.neuron, "full_path", ".")))
-            prev_path = full_path / "iwap_prev_round.json"
-        if not prev_path.exists():
-            return None
-
-        data = json.loads(prev_path.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            data = dict(data)
-            data["path"] = str(prev_path)
-            data["saved_at_utc"] = datetime.utcnow().isoformat(timespec="microseconds") + "Z"
-            return data
-        return {"path": str(prev_path), "content": data}
-    except Exception as exc:
-        bt.logging.warning(f"IWAP | Could not load iwap_prev_round.json: {exc}")
-        return {"error": str(exc)}
-
-
 def _build_consensus_summary_payload(
     *,
     season_number: Optional[int],
@@ -480,32 +456,27 @@ def _persist_round_summary_file(
     if season_number <= 0 or round_number <= 0:
         return
 
-    post_consensus_json = post_consensus if isinstance(post_consensus, dict) else None
-
-    payload: Dict[str, Any] = {
-        "schema_version": 1,
-        "season_number": season_number,
-        "round_number_in_season": round_number,
-        "saved_at_utc": datetime.utcnow().isoformat(),
-        "post_consensus_json": post_consensus_json,
-        "ipfs_uploaded": ipfs_uploaded if isinstance(ipfs_uploaded, dict) else None,
-        "ipfs_downloaded": ipfs_downloaded if isinstance(ipfs_downloaded, dict) else None,
-        "s3_logs_url": str(s3_logs_url) if isinstance(s3_logs_url, str) and s3_logs_url.strip() else None,
-    }
-
     try:
         root_getter = getattr(ctx, "_state_summary_root", None)
         base = root_getter() if callable(root_getter) else Path("data")
         target_dir = Path(base) / f"season_{season_number}" / f"round_{round_number}"
         target_dir.mkdir(parents=True, exist_ok=True)
-        (target_dir / "logs").mkdir(parents=True, exist_ok=True)
-        target = target_dir / "summary_round.json"
-        with target.open("w", encoding="utf-8") as fh:
-            json.dump(payload, fh, indent=2, sort_keys=True)
+        legacy_summary = target_dir / "summary_round.json"
+        if legacy_summary.exists():
+            legacy_summary.unlink()
+        if isinstance(ipfs_uploaded, dict):
+            with (target_dir / "ipfs_uploaded.json").open("w", encoding="utf-8") as fh:
+                json.dump(ipfs_uploaded, fh, indent=2, sort_keys=True)
+        if isinstance(ipfs_downloaded, dict):
+            with (target_dir / "ipfs_downloaded.json").open("w", encoding="utf-8") as fh:
+                json.dump(ipfs_downloaded, fh, indent=2, sort_keys=True)
+        if isinstance(post_consensus, dict):
+            with (target_dir / "post_consensus.json").open("w", encoding="utf-8") as fh:
+                json.dump(post_consensus, fh, indent=2, sort_keys=True)
     except Exception:
         from autoppia_web_agents_subnet.utils.logging import ColoredLogger
 
-        ColoredLogger.warning(f"IWAP | Could not persist summary_round file for season={season_number} round={round_number}")
+        ColoredLogger.warning(f"IWAP | Could not persist round artifacts for season={season_number} round={round_number}")
 
 
 async def start_round_flow(ctx, *, current_block: int, n_tasks: int) -> None:
@@ -1558,7 +1529,6 @@ async def finish_round_flow(
         "eligibility_statuses": local_eligibility_statuses,
     }
     validator_state_json = _load_validator_state_json(ctx)
-    validator_iwap_prev_round_json = _load_validator_iwap_prev_round_json(ctx)
 
     finish_request = iwa_models.FinishRoundIWAP(
         status="completed",
@@ -1573,7 +1543,6 @@ async def finish_round_flow(
         ipfs_downloaded=ipfs_downloaded,
         s3_logs_url=round_log_url,
         validator_state=validator_state_json,
-        validator_iwap_prev_round_json=validator_iwap_prev_round_json,
     )
 
     _persist_round_summary_file(

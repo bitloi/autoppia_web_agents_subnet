@@ -302,7 +302,6 @@ class FinishRoundIWAP:
     ipfs_downloaded: Optional[Dict[str, Any]] = None
     s3_logs_url: Optional[str] = None
     validator_state: Optional[Dict[str, Any]] = None
-    validator_iwap_prev_round_json: Optional[Dict[str, Any]] = None
     # Compatibility fields kept in the payload shape even though current consumers use the richer summaries
     winners: List[RoundWinnerIWAP] = field(default_factory=list)
     winner_rewards: List[float] = field(default_factory=list)
@@ -333,8 +332,6 @@ class FinishRoundIWAP:
             payload["s3_logs_url"] = self.s3_logs_url
         if self.validator_state is not None:
             payload["validator_state"] = self.validator_state
-        if self.validator_iwap_prev_round_json is not None:
-            payload["validator_iwap_prev_round_json"] = self.validator_iwap_prev_round_json
 
         # Compatibility fields included only when populated
         if self.winners:

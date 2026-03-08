@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import re
 import time
@@ -318,59 +317,7 @@ class ValidatorPlatformMixin:
             tasks_completed=tasks_completed,
         )
 
-    def _iwap_prev_round_path(self) -> Path:
-        """Path to persist best-run sources that survive validator restart."""
-        try:
-            full_path = Path(str(getattr(self, "config", None) and getattr(self.config, "neuron", None) and getattr(self.config.neuron, "full_path", None) or "."))
-        except Exception:
-            full_path = Path(".")
-        full_path.mkdir(parents=True, exist_ok=True)
-        return full_path / "iwap_prev_round.json"
-
-    def _save_iwap_prev_round_state(self) -> None:
-        """Persist prev_round_agent_run_ids, prev_round_run_stats and _evaluated_commits_by_miner to disk (best-effort)."""
-        try:
-            run_ids = getattr(self, "prev_round_agent_run_ids", None) or {}
-            stats = getattr(self, "prev_round_run_stats", None) or {}
-            evaluated = getattr(self, "_evaluated_commits_by_miner", None) or {}
-            if not run_ids and not stats and not evaluated:
-                return
-            path = self._iwap_prev_round_path()
-            # Serialize _evaluated_commits_by_miner: uid -> {"repo|commit": stats_dict}
-            evaluated_ser = {}
-            for uid, key_to_data in evaluated.items():
-                evaluated_ser[str(uid)] = dict(key_to_data)
-            data = {
-                "prev_round_agent_run_ids": {str(uid): run_id for uid, run_id in run_ids.items()},
-                "prev_round_run_stats": {str(uid): s for uid, s in stats.items()},
-                "evaluated_commits_by_miner": evaluated_ser,
-            }
-            path.write_text(json.dumps(data, indent=0), encoding="utf-8")
-        except Exception:
-            pass
-
-    def _load_iwap_prev_round_state(self) -> None:
-        """Load persisted best-run sources from disk after validator restart."""
-        try:
-            path = self._iwap_prev_round_path()
-            if not path.exists():
-                return
-            data = json.loads(path.read_text(encoding="utf-8"))
-            run_ids_raw = data.get("prev_round_agent_run_ids") or {}
-            stats_raw = data.get("prev_round_run_stats") or {}
-            self.prev_round_agent_run_ids = {int(uid): run_id for uid, run_id in run_ids_raw.items()}
-            self.prev_round_run_stats = {int(uid): s for uid, s in stats_raw.items()}
-            evaluated_raw = data.get("evaluated_commits_by_miner") or {}
-            self._evaluated_commits_by_miner = {int(uid): dict(key_to_data) for uid, key_to_data in evaluated_raw.items()}
-        except Exception:
-            self.prev_round_agent_run_ids = getattr(self, "prev_round_agent_run_ids", None) or {}
-            self.prev_round_run_stats = getattr(self, "prev_round_run_stats", None) or {}
-            self._evaluated_commits_by_miner = getattr(self, "_evaluated_commits_by_miner", None) or {}
-
     def _reset_iwap_round_state(self) -> None:
-        # Persist current runs/stats for next round (reused-run resolution).
-        # Only snapshot when we have runs (first caller, e.g. finish_round_flow); if called again
-        # from settlement after current_agent_runs was already cleared, do not overwrite prev_round_* with empty.
         current_runs = getattr(self, "current_agent_runs", None) or {}
         if current_runs:
             self.prev_round_agent_run_ids = {uid: run.agent_run_id for uid, run in current_runs.items()}
@@ -423,9 +370,6 @@ class ValidatorPlatformMixin:
         # Reset round number to force recalculation on next round start
         # This prevents reusing stale values when discarding old round state
         self._current_round_number = None
-
-        # Persist historical best-run sources for the next round / next process start.
-        self._save_iwap_prev_round_state()
 
     @staticmethod
     def _round_metrics_payload_from_stats(stats: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -567,10 +511,6 @@ class ValidatorPlatformMixin:
             if existing_total <= 0 and incoming_total > 0:
                 # Upgrade: replace a previously failed evaluation with a good one.
                 self._evaluated_commits_by_miner.setdefault(uid, {})[key] = incoming
-                try:
-                    self._save_iwap_prev_round_state()
-                except Exception:
-                    pass
                 return
             # Both existing and incoming have total_tasks=0: nothing useful to store.
             return
@@ -586,10 +526,6 @@ class ValidatorPlatformMixin:
             return
 
         self._evaluated_commits_by_miner.setdefault(uid, {})[key] = incoming
-        try:
-            self._save_iwap_prev_round_state()
-        except Exception:
-            pass
 
     # ──────────────────────────────────────────────────────────────────────────
     # Async subtensor provider for consensus (single instance per validator)

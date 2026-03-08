@@ -247,10 +247,6 @@ class ValidatorRoundStartMixin:
             # New season = new tasks → re-evaluate all commits; clear "already evaluated" map.
             if hasattr(self, "_evaluated_commits_by_miner"):
                 self._evaluated_commits_by_miner = {}
-                try:
-                    self._save_iwap_prev_round_state()
-                except Exception:
-                    pass
 
         current_block = self.block
         self.round_manager.start_new_round(current_block)
