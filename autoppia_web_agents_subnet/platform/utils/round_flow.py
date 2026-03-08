@@ -464,8 +464,6 @@ def _extract_round_summary_v2(*, season_history: Dict[Any, Any], season_number: 
     if not isinstance(round_entry, dict):
         return None
     post_consensus_json = round_entry.get("post_consensus_json")
-    if not isinstance(post_consensus_json, dict):
-        post_consensus_json = round_entry.get("post_consensus_summary")
     return post_consensus_json if isinstance(post_consensus_json, dict) else None
 
 
@@ -1497,7 +1495,7 @@ async def finish_round_flow(
                 }
             )
 
-        post_consensus_summary_block = _extract_round_summary_v2(
+        post_consensus_json_summary = _extract_round_summary_v2(
             season_history=getattr(ctx, "_season_competition_history", {}) or {},
             season_number=int(season_number_for_summary or 0),
             round_number_in_season=int(round_number_for_summary or 0),
@@ -1511,7 +1509,7 @@ async def finish_round_flow(
             "total_stake": float(sum(float(p.get("stake", 0.0) or 0.0) for p in _downloaded_payloads_raw if isinstance(p, dict))) if _downloaded_payloads_raw else 0.0,
             "miners": post_consensus_miners,
             "timestamp": ended_at,
-            "summary": post_consensus_summary_block,
+            "summary": post_consensus_json_summary,
         }
 
         # NOTA: post_consensus_evaluation NO se sube a IPFS
