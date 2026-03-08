@@ -111,6 +111,13 @@ class ValidatorEvaluationMixin:
                 except Exception:
                     pass
             try:
+                agent_uid = int(getattr(agent, "uid"))
+                run = getattr(self, "current_agent_runs", {}).get(agent_uid)
+                if run is not None:
+                    run.zero_reason = zero_reason if finalized_score <= 0.0 else None
+            except Exception:
+                pass
+            try:
                 status_map = getattr(self, "eligibility_status_by_uid", None)
                 if not isinstance(status_map, dict):
                     status_map = {}
@@ -202,6 +209,75 @@ class ValidatorEvaluationMixin:
                             run.agent_run_id,
                             stats,
                         )
+                except Exception:
+                    pass
+
+        def _record_local_task_result(
+            *,
+            agent_uid: int,
+            reward: float,
+            eval_score: float,
+            exec_time: float,
+            cost: float,
+        ) -> None:
+            """
+            Keep the validator's local round state aligned with the task evaluations
+            that are actually being produced in this pipeline.
+
+            The IPFS payload for consensus reads from these structures, so they must
+            be updated here instead of relying on the older task_flow path.
+            """
+            acc_map = getattr(self, "agent_run_accumulators", None)
+            if not isinstance(acc_map, dict):
+                acc_map = {}
+                self.agent_run_accumulators = acc_map
+            acc = acc_map.setdefault(
+                agent_uid,
+                {"reward": 0.0, "eval_score": 0.0, "execution_time": 0.0, "cost": 0.0, "tasks": 0},
+            )
+            acc["reward"] += float(reward)
+            acc["eval_score"] += float(eval_score)
+            acc["execution_time"] += float(exec_time)
+            acc["cost"] += float(cost)
+            acc["tasks"] += 1
+
+            round_manager = getattr(self, "round_manager", None)
+            if round_manager is not None:
+                round_rewards = getattr(round_manager, "round_rewards", None)
+                if not isinstance(round_rewards, dict):
+                    round_rewards = {}
+                    round_manager.round_rewards = round_rewards
+                round_rewards.setdefault(agent_uid, []).append(float(reward))
+
+                round_eval_scores = getattr(round_manager, "round_eval_scores", None)
+                if not isinstance(round_eval_scores, dict):
+                    round_eval_scores = {}
+                    round_manager.round_eval_scores = round_eval_scores
+                round_eval_scores.setdefault(agent_uid, []).append(float(eval_score))
+
+                round_times = getattr(round_manager, "round_times", None)
+                if not isinstance(round_times, dict):
+                    round_times = {}
+                    round_manager.round_times = round_times
+                round_times.setdefault(agent_uid, []).append(float(exec_time))
+
+            run = getattr(self, "current_agent_runs", {}).get(agent_uid)
+            if run is not None:
+                total_tasks = int(acc.get("tasks", 0) or 0)
+                success_tasks = len([r for r in (getattr(round_manager, "round_rewards", {}) or {}).get(agent_uid, []) if float(r) >= 0.5])
+                failed_tasks = max(total_tasks - success_tasks, 0)
+                run.total_tasks = total_tasks
+                run.completed_tasks = success_tasks
+                run.failed_tasks = failed_tasks
+                run.total_reward = float(acc.get("reward", 0.0) or 0.0)
+                run.average_reward = (float(acc["reward"]) / float(total_tasks)) if total_tasks > 0 else 0.0
+                run.average_score = (float(acc["eval_score"]) / float(total_tasks)) if total_tasks > 0 else 0.0
+                run.average_execution_time = (float(acc["execution_time"]) / float(total_tasks)) if total_tasks > 0 else 0.0
+                try:
+                    meta = dict(getattr(run, "metadata", {}) or {})
+                    meta["total_cost"] = float(acc.get("cost", 0.0) or 0.0)
+                    meta["average_cost"] = (float(acc["cost"]) / float(total_tasks)) if total_tasks > 0 else 0.0
+                    run.metadata = meta
                 except Exception:
                     pass
 
@@ -669,6 +745,13 @@ class ValidatorEvaluationMixin:
                         zero_reason_task = None
                         if score_f <= 0.0 or reward <= 0.0:
                             zero_reason_task = "task_timeout" if exec_time_s >= task_timeout_sec else "task_failed"
+                        _record_local_task_result(
+                            agent_uid=int(agent.uid),
+                            reward=float(reward),
+                            eval_score=float(score_f),
+                            exec_time=float(exec_time_s),
+                            cost=float(cost),
+                        )
                         # Store evaluation data for batch submission
                         batch_eval_data.append(
                             {
