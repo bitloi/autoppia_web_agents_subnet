@@ -10,6 +10,7 @@ from autoppia_web_agents_subnet.validator.config import (
     CONSENSUS_VERSION,
     MIN_VALIDATOR_STAKE_FOR_CONSENSUS_TAO,
     IPFS_API_URL,
+    LAST_WINNER_BONUS_PCT,
 )
 from autoppia_web_agents_subnet.utils.commitments import (
     read_all_plain_commitments,
@@ -245,6 +246,152 @@ def _extract_metrics_from_payload(payload: Dict[str, Any]) -> tuple[Dict[int, fl
     return rewards, metrics
 
 
+def _extract_current_run_metrics_from_payload(payload: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
+    metrics: Dict[int, Dict[str, Any]] = {}
+    miners = payload.get("miners")
+    if not isinstance(miners, list):
+        return metrics
+    for miner_entry in miners:
+        if not isinstance(miner_entry, dict):
+            continue
+        current_run = miner_entry.get("current_run")
+        if not isinstance(current_run, dict):
+            continue
+        try:
+            uid = int(miner_entry.get("uid", miner_entry.get("miner_uid")))
+        except Exception:
+            continue
+        metrics[uid] = {
+            "avg_reward": float(current_run.get("reward", 0.0) or 0.0),
+            "avg_eval_score": float(current_run.get("score", 0.0) or 0.0),
+            "avg_eval_time": float(current_run.get("time", 0.0) or 0.0),
+            "avg_cost": float(current_run.get("cost", 0.0) or 0.0),
+            "tasks_sent": int(current_run.get("tasks_received", 0) or 0),
+            "tasks_success": int(current_run.get("tasks_success", 0) or 0),
+        }
+    return metrics
+
+
+def _summary_snapshot_from_run(uid: Optional[int], run_payload: Optional[Dict[str, Any]], *, weight: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    if uid is None:
+        return None
+    snapshot = {
+        "uid": int(uid),
+        "reward": 0.0,
+        "score": 0.0,
+        "time": 0.0,
+        "cost": 0.0,
+    }
+    if isinstance(run_payload, dict):
+        try:
+            snapshot["reward"] = float(run_payload.get("reward", 0.0) or 0.0)
+        except Exception:
+            pass
+        try:
+            snapshot["score"] = float(run_payload.get("score", 0.0) or 0.0)
+        except Exception:
+            pass
+        try:
+            snapshot["time"] = float(run_payload.get("time", 0.0) or 0.0)
+        except Exception:
+            pass
+        try:
+            snapshot["cost"] = float(run_payload.get("cost", 0.0) or 0.0)
+        except Exception:
+            pass
+    if weight is not None:
+        snapshot["weight"] = float(weight)
+    return snapshot
+
+
+def _build_local_round_summary(
+    self,
+    *,
+    season_number: int,
+    round_number: int,
+    miners_payload: list[dict[str, Any]],
+) -> Dict[str, Any]:
+    try:
+        percentage_to_dethrone = max(float(LAST_WINNER_BONUS_PCT), 0.0)
+    except Exception:
+        percentage_to_dethrone = 0.05
+
+    season_history = getattr(self, "_season_competition_history", None) or {}
+    season_state = season_history.get(int(season_number), {}) if isinstance(season_history, dict) else {}
+    if not isinstance(season_state, dict):
+        season_state = {}
+    summary_state = season_state.get("summary", {})
+    if not isinstance(summary_state, dict):
+        summary_state = {}
+
+    leader_before = None
+    reigning_uid_raw = summary_state.get("current_winner_uid")
+    try:
+        reigning_uid = int(reigning_uid_raw) if reigning_uid_raw is not None else None
+    except Exception:
+        reigning_uid = None
+    if reigning_uid is not None:
+        leader_before = summary_state.get("current_winner_snapshot")
+        if not isinstance(leader_before, dict):
+            best_snapshots = summary_state.get("best_snapshot_by_miner", {})
+            if isinstance(best_snapshots, dict):
+                leader_before = best_snapshots.get(str(reigning_uid)) or best_snapshots.get(reigning_uid)
+        leader_before = _summary_snapshot_from_run(reigning_uid, leader_before)
+
+    candidate_entry = None
+    candidate_run = None
+    best_key = None
+    for miner in miners_payload:
+        if not isinstance(miner, dict):
+            continue
+        best_run = miner.get("best_run")
+        if not isinstance(best_run, dict):
+            continue
+        try:
+            reward = float(best_run.get("reward", 0.0) or 0.0)
+            score = float(best_run.get("score", 0.0) or 0.0)
+            avg_time = float(best_run.get("time", 0.0) or 0.0)
+            uid = int(miner.get("uid"))
+        except Exception:
+            continue
+        key = (reward, score, -avg_time, -uid)
+        if best_key is None or key > best_key:
+            best_key = key
+            candidate_entry = miner
+            candidate_run = best_run
+
+    candidate_snapshot = None
+    if isinstance(candidate_entry, dict):
+        candidate_snapshot = _summary_snapshot_from_run(candidate_entry.get("uid"), candidate_run)
+
+    leader_after = candidate_snapshot
+    dethroned = False
+    if leader_before is not None:
+        leader_before_reward = float(leader_before.get("reward", 0.0) or 0.0)
+        candidate_reward = float(candidate_snapshot.get("reward", 0.0) or 0.0) if candidate_snapshot else 0.0
+        if candidate_snapshot is None:
+            leader_after = leader_before
+        elif int(candidate_snapshot.get("uid")) != int(leader_before.get("uid")):
+            threshold = leader_before_reward * (1.0 + percentage_to_dethrone)
+            if candidate_reward > threshold:
+                dethroned = True
+                leader_after = candidate_snapshot
+            else:
+                leader_after = leader_before
+        else:
+            leader_after = candidate_snapshot
+
+    return {
+        "season": int(season_number),
+        "round": int(round_number),
+        "percentage_to_dethrone": float(percentage_to_dethrone),
+        "dethroned": bool(dethroned),
+        "leader_before_round": leader_before,
+        "candidate_this_round": candidate_snapshot,
+        "leader_after_round": leader_after,
+    }
+
+
 def _hotkey_to_uid_map(metagraph) -> Dict[str, int]:
     mapping: Dict[str, int] = {}
     try:
@@ -309,6 +456,12 @@ async def publish_round_snapshot(
                 "current_run": getattr(self, "_current_round_run_payload")(uid),
             }
         )
+    local_summary = _build_local_round_summary(
+        self,
+        season_number=int(season_number),
+        round_number=int(round_number),
+        miners_payload=miners_payload,
+    )
     payload = {
         "v": int(consensus_version),
         "s": int(season_number),
@@ -322,6 +475,7 @@ async def publish_round_snapshot(
         "validator_round_id": getattr(self, "current_round_id", None),
         "validator_version": getattr(self, "version", None),
         "miners": miners_payload,
+        "summary": local_summary,
     }
 
     try:
@@ -456,6 +610,7 @@ async def aggregate_scores_from_commitments(
     weighted_sum: Dict[int, float] = {}
     weight_total: Dict[int, float] = {}
     metric_acc: Dict[int, Dict[str, float]] = {}
+    current_metric_acc: Dict[int, Dict[str, float]] = {}
 
     included = 0
     skipped_legacy_consensus_version = 0
@@ -571,6 +726,7 @@ async def aggregate_scores_from_commitments(
                 continue
 
         rewards, miner_metrics = _extract_metrics_from_payload(payload)
+        current_run_metrics = _extract_current_run_metrics_from_payload(payload)
         if not isinstance(rewards, dict) or not rewards:
             continue
 
@@ -660,6 +816,52 @@ async def aggregate_scores_from_commitments(
                     if handshake_ok:
                         acc["handshake_ok_num"] += effective_weight
 
+        if isinstance(current_run_metrics, dict):
+            for metric_uid, entry_raw in current_run_metrics.items():
+                if not isinstance(entry_raw, dict):
+                    continue
+                acc = current_metric_acc.setdefault(
+                    int(metric_uid),
+                    {
+                        "avg_reward_num": 0.0,
+                        "avg_reward_den": 0.0,
+                        "avg_eval_score_num": 0.0,
+                        "avg_eval_score_den": 0.0,
+                        "avg_eval_time_num": 0.0,
+                        "avg_eval_time_den": 0.0,
+                        "avg_cost_num": 0.0,
+                        "avg_cost_den": 0.0,
+                        "tasks_sent_num": 0.0,
+                        "tasks_sent_den": 0.0,
+                        "tasks_success_num": 0.0,
+                        "tasks_success_den": 0.0,
+                    },
+                )
+                avg_reward = _extract_metric_value(entry_raw, "avg_reward", "reward")
+                if avg_reward is not None:
+                    acc["avg_reward_num"] += effective_weight * float(avg_reward)
+                    acc["avg_reward_den"] += effective_weight
+                avg_eval_score = _extract_metric_value(entry_raw, "avg_eval_score")
+                if avg_eval_score is not None:
+                    acc["avg_eval_score_num"] += effective_weight * float(avg_eval_score)
+                    acc["avg_eval_score_den"] += effective_weight
+                avg_eval_time = _extract_metric_value(entry_raw, "avg_eval_time")
+                if avg_eval_time is not None:
+                    acc["avg_eval_time_num"] += effective_weight * float(avg_eval_time)
+                    acc["avg_eval_time_den"] += effective_weight
+                avg_cost = _extract_metric_value(entry_raw, "avg_cost")
+                if avg_cost is not None:
+                    acc["avg_cost_num"] += effective_weight * float(avg_cost)
+                    acc["avg_cost_den"] += effective_weight
+                tasks_sent = _extract_int_metric_value(entry_raw, "tasks_sent")
+                if tasks_sent is not None:
+                    acc["tasks_sent_num"] += effective_weight * float(tasks_sent)
+                    acc["tasks_sent_den"] += effective_weight
+                tasks_success = _extract_int_metric_value(entry_raw, "tasks_success")
+                if tasks_success is not None:
+                    acc["tasks_success_num"] += effective_weight * float(tasks_success)
+                    acc["tasks_success_den"] += effective_weight
+
         included += 1
         fetched.append((hk, cid, st_val))
         scores_by_validator[hk] = per_val_map
@@ -702,6 +904,24 @@ async def aggregate_scores_from_commitments(
             stats_entry["handshake_ok"] = bool(ratio >= 0.5)
         if stats_entry:
             stats_by_miner[int(uid)] = stats_entry
+
+    current_stats_by_miner: Dict[int, Dict[str, Any]] = {}
+    for uid, acc in current_metric_acc.items():
+        stats_entry: Dict[str, Any] = {}
+        if acc.get("avg_reward_den", 0.0) > 0.0:
+            stats_entry["avg_reward"] = float(acc["avg_reward_num"] / acc["avg_reward_den"])
+        if acc.get("avg_eval_score_den", 0.0) > 0.0:
+            stats_entry["avg_eval_score"] = float(acc["avg_eval_score_num"] / acc["avg_eval_score_den"])
+        if acc.get("avg_eval_time_den", 0.0) > 0.0:
+            stats_entry["avg_eval_time"] = float(acc["avg_eval_time_num"] / acc["avg_eval_time_den"])
+        if acc.get("avg_cost_den", 0.0) > 0.0:
+            stats_entry["avg_cost"] = float(acc["avg_cost_num"] / acc["avg_cost_den"])
+        if acc.get("tasks_sent_den", 0.0) > 0.0:
+            stats_entry["tasks_sent"] = int(round(acc["tasks_sent_num"] / acc["tasks_sent_den"]))
+        if acc.get("tasks_success_den", 0.0) > 0.0:
+            stats_entry["tasks_success"] = int(round(acc["tasks_success_num"] / acc["tasks_success_den"]))
+        if stats_entry:
+            current_stats_by_miner[int(uid)] = stats_entry
 
     if included > 0:
         all_stakes_zero = all(stake == 0.0 for _, _, stake in fetched)
@@ -772,6 +992,7 @@ async def aggregate_scores_from_commitments(
         "rewards_by_validator": scores_by_validator,
         "scores_by_validator": scores_by_validator,
         "stats_by_miner": stats_by_miner,
+        "current_stats_by_miner": current_stats_by_miner,
         "downloaded_payloads": downloaded_payloads,
         "skips": {
             "legacy_consensus_version": skipped_legacy_consensus_version_list,

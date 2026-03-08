@@ -435,6 +435,20 @@ def _build_consensus_summary_payload(
     }
 
 
+def _extract_round_summary_v2(*, season_history: Dict[Any, Any], season_number: int, round_number_in_season: int) -> Optional[Dict[str, Any]]:
+    season_state = season_history.get(int(season_number), {}) if isinstance(season_history, dict) else {}
+    if not isinstance(season_state, dict):
+        return None
+    rounds_state = season_state.get("rounds", {})
+    if not isinstance(rounds_state, dict):
+        return None
+    round_entry = rounds_state.get(int(round_number_in_season)) or rounds_state.get(str(int(round_number_in_season)))
+    if not isinstance(round_entry, dict):
+        return None
+    summary = round_entry.get("post_consensus_summary")
+    return summary if isinstance(summary, dict) else None
+
+
 def _persist_round_summary_file(
     *,
     ctx,
@@ -462,8 +476,7 @@ def _persist_round_summary_file(
         "ipfs_uploaded": ipfs_uploaded if isinstance(ipfs_uploaded, dict) else None,
         "ipfs_downloaded": ipfs_downloaded if isinstance(ipfs_downloaded, dict) else None,
         "s3_logs_url": str(s3_logs_url) if isinstance(s3_logs_url, str) and s3_logs_url.strip() else None,
-        "round_summary": pre_summary.get("round_summary", {}) if isinstance(pre_summary, dict) else {},
-        "season_summary": pre_summary.get("season_summary", {}) if isinstance(pre_summary, dict) else {},
+        "summary": post_summary if isinstance(post_summary, dict) else (pre_summary.get("summary") if isinstance(pre_summary, dict) else None),
     }
 
     try:
@@ -1072,7 +1085,6 @@ async def finish_round_flow(
     local_reward_candidates: list[tuple[int, float, float]] = []
     local_evaluation_miners = []
     local_stats_by_miner: Dict[int, Dict[str, Any]] = {}
-    local_best_rewards: Dict[int, float] = {}
 
     for miner_uid in participant_uids:
         best_run = getattr(ctx, "_best_run_payload_for_miner")(miner_uid)
@@ -1100,7 +1112,6 @@ async def finish_round_flow(
             times = round_times.get(miner_uid, []) or []
             avg_time = sum(times) / len(times) if times else 999999.0
         local_reward_candidates.append((miner_uid, reward_value, avg_time))
-        local_best_rewards[miner_uid] = reward_value
 
     sorted_miners_local = sorted(local_reward_candidates, key=lambda item: (-item[1], item[2], item[0]))
     rank_map_local = {uid: rank for rank, (uid, _score, _time) in enumerate(sorted_miners_local, start=1)}
@@ -1266,25 +1277,16 @@ async def finish_round_flow(
 
     local_eligibility_statuses_raw = getattr(ctx, "eligibility_status_by_uid", None) or {}
     local_eligibility_statuses = {str(uid): str(status) for uid, status in local_eligibility_statuses_raw.items()}
-    local_eligible_uids = _eligible_uids_from_status_map(local_eligibility_statuses_raw)
 
-    # Build local_evaluation (what THIS validator evaluated - pre-consensus)
-    local_evaluation = {
-        "timestamp": ended_at,
-        "miners": local_evaluation_miners,
-        "summary": _build_consensus_summary_payload(
-            season_number=season_number_for_summary,
-            round_number_in_season=round_number_for_summary,
-            miner_rewards=local_best_rewards,
-            season_history=getattr(ctx, "_season_competition_history", {}),
-            eligible_uids=local_eligible_uids,
-        ),
-    }
-
-    # Actualizar el payload IPFS guardado para incluir local_evaluation
-    # (aunque se publique antes, actualizamos el payload guardado para que tenga la info completa)
-    if hasattr(ctx, "validator") and hasattr(ctx.validator, "_ipfs_uploaded_payload"):
-        ctx.validator._ipfs_uploaded_payload["local_evaluation"] = local_evaluation
+    # local_evaluation should match what this validator actually uploaded to IPFS.
+    local_evaluation = getattr(ctx, "_ipfs_uploaded_payload", None)
+    if not isinstance(local_evaluation, dict):
+        local_evaluation = {
+            "season": int(season_number_for_summary or 0),
+            "round": int(round_number_for_summary or 0),
+            "miners": local_evaluation_miners,
+            "summary": None,
+        }
 
     # FASE 2: IPFS uploaded data (what THIS validator published)
     ipfs_uploaded = None
@@ -1343,6 +1345,17 @@ async def finish_round_flow(
                 published_rewards_raw = published_payload.get("rewards")
                 if not isinstance(published_rewards_raw, dict):
                     published_rewards_raw = published_payload.get("scores")
+                if not isinstance(published_rewards_raw, dict):
+                    for miner_entry in published_payload.get("miners", []) if isinstance(published_payload.get("miners", []), list) else []:
+                        if not isinstance(miner_entry, dict):
+                            continue
+                        best_run = miner_entry.get("best_run")
+                        if not isinstance(best_run, dict):
+                            continue
+                        try:
+                            published_rewards[int(miner_entry.get("uid"))] = float(best_run.get("reward", 0.0) or 0.0)
+                        except Exception:
+                            continue
             if isinstance(published_rewards_raw, dict):
                 for uid_raw, reward_raw in published_rewards_raw.items():
                     try:
@@ -1359,11 +1372,12 @@ async def finish_round_flow(
             consensus_rewards = avg_rewards
 
     stats_by_miner = {}
+    current_stats_by_miner = {}
     if agg_meta and isinstance(agg_meta, dict):
         stats_by_miner = agg_meta.get("stats_by_miner", {}) or {}
+        current_stats_by_miner = agg_meta.get("current_stats_by_miner", {}) or {}
 
     if consensus_rewards and isinstance(consensus_rewards, dict):
-        post_consensus_eligible_uids = _eligible_uids_from_downloaded_payloads(_downloaded_payloads_raw) or set(local_eligible_uids)
         # Calculate ranks from consensus rewards.
         sorted_consensus = sorted(consensus_rewards.items(), key=lambda item: item[1], reverse=True)
         rank_map_consensus = {uid: rank for rank, (uid, _consensus_reward) in enumerate(sorted_consensus, start=1)}
@@ -1406,18 +1420,33 @@ async def finish_round_flow(
             tasks_sent = consensus_stats.get("tasks_sent") or local_stats.get("tasks_sent", 0)
             tasks_success = consensus_stats.get("tasks_success") or local_stats.get("tasks_success", 0)
 
+            current_stats = current_stats_by_miner.get(miner_uid) or {}
+            current_run_consensus = None
+            if isinstance(current_stats, dict) and current_stats:
+                current_run_consensus = {
+                    "reward": float(current_stats.get("avg_reward", 0.0) or 0.0),
+                    "score": float(current_stats.get("avg_eval_score", 0.0) or 0.0),
+                    "time": float(current_stats.get("avg_eval_time", 0.0) or 0.0),
+                    "cost": float(current_stats.get("avg_cost", 0.0) or 0.0),
+                    "tasks_received": int(current_stats.get("tasks_sent", 0) or 0),
+                    "tasks_success": int(current_stats.get("tasks_success", 0) or 0),
+                }
+
             post_consensus_miners.append(
                 {
-                    "miner_uid": miner_uid,
-                    "miner_hotkey": miner_hotkey,  # Miner hotkey for identification
-                    "consensus_reward": float(consensus_reward),  # Stake-weighted average of per-validator avg_reward values
-                    "avg_eval_score": float(post_consensus_avg_eval_score),  # Stake-weighted pure evaluation score when available
-                    "avg_eval_time": float(avg_eval_time),  # Stake-weighted average evaluation time when available
-                    "avg_cost": float(avg_cost),  # Stake-weighted average cost when available
-                    "tasks_sent": int(tasks_sent),  # SIEMPRE presente - consensus o local
-                    "tasks_success": int(tasks_success),  # SIEMPRE presente - consensus o local
-                    "weight": float(weight),
-                    "rank": rank,
+                    "uid": miner_uid,
+                    "hotkey": miner_hotkey,
+                    "best_run_consensus": {
+                        "reward": float(consensus_reward),
+                        "score": float(post_consensus_avg_eval_score),
+                        "time": float(avg_eval_time),
+                        "cost": float(avg_cost),
+                        "tasks_received": int(tasks_sent),
+                        "tasks_success": int(tasks_success),
+                        "rank": rank,
+                        "weight": float(weight),
+                    },
+                    "current_run_consensus": current_run_consensus,
                 }
             )
 
@@ -1436,37 +1465,44 @@ async def finish_round_flow(
 
             post_consensus_miners.append(
                 {
-                    "miner_uid": burn_uid,
-                    "miner_hotkey": burn_miner_hotkey,  # Miner hotkey for identification
-                    "consensus_reward": 0.0,  # Burn UID doesn't have a reward
-                    "weight": float(burn_weight),
-                    "rank": max_rank + 1,
+                    "uid": burn_uid,
+                    "hotkey": burn_miner_hotkey,
+                    "best_run_consensus": {
+                        "reward": 0.0,
+                        "score": 0.0,
+                        "time": 0.0,
+                        "cost": 0.0,
+                        "tasks_received": 0,
+                        "tasks_success": 0,
+                        "rank": max_rank + 1,
+                        "weight": float(burn_weight),
+                    },
+                    "current_run_consensus": None,
                 }
             )
 
+        post_consensus_summary = _extract_round_summary_v2(
+            season_history=getattr(ctx, "_season_competition_history", {}) or {},
+            season_number=int(season_number_for_summary or 0),
+            round_number_in_season=int(round_number_for_summary or 0),
+        )
+
         post_consensus_evaluation = {
+            "season": int(season_number_for_summary or 0),
+            "round": int(round_number_for_summary or 0),
+            "consensus_type": "stake_weighted",
+            "validators_participated": len(_downloaded_payloads_raw) if _downloaded_payloads_raw else 0,
+            "total_stake": float(sum(float(p.get("stake", 0.0) or 0.0) for p in _downloaded_payloads_raw if isinstance(p, dict))) if _downloaded_payloads_raw else 0.0,
             "miners": post_consensus_miners,
             "timestamp": ended_at,
-            "summary": _build_consensus_summary_payload(
-                season_number=season_number_for_summary,
-                round_number_in_season=round_number_for_summary,
-                miner_rewards=consensus_rewards,
-                season_history=getattr(ctx, "_season_competition_history", {}),
-                eligible_uids=post_consensus_eligible_uids,
-            ),
+            "summary": post_consensus_summary,
         }
 
         # NOTA: post_consensus_evaluation NO se sube a IPFS
         # Se calcula DESPUÉS de descargar todos los IPFS de otros validadores
         # Solo se guarda para enviarlo al backend en finish_round
 
-    # Enrich ipfs_uploaded.payload with explicit evaluation keys (no duplication in validator_summary)
-    if ipfs_uploaded and isinstance(ipfs_uploaded.get("payload"), dict):
-        p = ipfs_uploaded["payload"]
-        p["evaluation_pre_consensus"] = local_evaluation
-        p["evaluation_post_consensus"] = post_consensus_evaluation
-
-    # Build ipfs_downloaded with one entry per validator: cid, payload with evaluation_pre_consensus and evaluation_post_consensus
+    # Build ipfs_downloaded with the raw downloaded payloads plus the shared post-consensus object.
     if _downloaded_payloads_raw:
         total_stake = sum(p.get("stake", 0.0) for p in _downloaded_payloads_raw)
         payloads = []
@@ -1478,8 +1514,6 @@ async def finish_round_flow(
                     "validator_uid": p.get("uid"),
                     "validator_hotkey": p.get("validator_hotkey") or p.get("hk"),
                     "cid": p.get("cid"),
-                    "evaluation_pre_consensus": p.get("local_evaluation"),
-                    "evaluation_post_consensus": post_consensus_evaluation,
                     "payload": p,
                 }
             )
@@ -1494,12 +1528,11 @@ async def finish_round_flow(
     season_for_round = int(season_number_for_summary or 0)
     round_for_round = int(round_number_for_summary or 0)
     # round_log_* were set at the start of this flow so we always upload even if something failed later
-    # validator_summary: single object with round, s3_logs_url, ipfs_uploaded, ipfs_downloaded,
-    # evaluation_pre_consensus, evaluation_post_consensus, handshake_results
+    # validator_summary: observability object kept in backend, separate from IPFS raw payloads.
     handshake_results_raw = getattr(ctx, "handshake_results", None) or {}
     handshake_results = {str(uid): status for uid, status in handshake_results_raw.items()}
 
-    pre_consensus_summary = local_evaluation.get("summary") if isinstance(local_evaluation, dict) else None
+    pre_consensus_summary = local_evaluation
     post_consensus_summary = post_consensus_evaluation.get("summary") if isinstance(post_consensus_evaluation, dict) else None
 
     validator_summary = {

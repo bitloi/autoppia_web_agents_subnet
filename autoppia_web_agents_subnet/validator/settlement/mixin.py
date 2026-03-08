@@ -49,7 +49,17 @@ def _eligible_uids_from_consensus_payloads(raw_payloads: object) -> set[int]:
         payload = payload_entry.get("payload")
         if not isinstance(payload, dict):
             continue
-        eligible.update(_eligible_uids_from_status_map(payload.get("eligibility_statuses")))
+        miners = payload.get("miners")
+        if isinstance(miners, list):
+            for miner_raw in miners:
+                if not isinstance(miner_raw, dict):
+                    continue
+                uid_raw = miner_raw.get("uid", miner_raw.get("miner_uid"))
+                try:
+                    eligible.add(int(uid_raw))
+                except Exception:
+                    continue
+            continue
         miner_metrics = payload.get("miner_metrics")
         if not isinstance(miner_metrics, dict):
             continue
@@ -445,6 +455,27 @@ class ValidatorSettlementMixin:
         best_round_by_miner = summary_state.get("best_round_by_miner")
         if not isinstance(best_round_by_miner, dict):
             best_round_by_miner = {}
+        best_snapshot_by_miner = summary_state.get("best_snapshot_by_miner")
+        if not isinstance(best_snapshot_by_miner, dict):
+            best_snapshot_by_miner = {}
+
+        stats_by_miner = agg_meta.get("stats_by_miner", {}) if isinstance(agg_meta, dict) else {}
+
+        def _snapshot_for_uid(uid: int, reward: float, *, weight: Optional[float] = None, fallback: Optional[dict] = None) -> dict:
+            stats = stats_by_miner.get(int(uid), {}) if isinstance(stats_by_miner, dict) else {}
+            if not isinstance(stats, dict):
+                stats = {}
+            base = fallback if isinstance(fallback, dict) else {}
+            snapshot = {
+                "uid": int(uid),
+                "reward": float(reward),
+                "score": float(stats.get("avg_eval_score", base.get("score", 0.0)) or 0.0),
+                "time": float(stats.get("avg_eval_time", base.get("time", 0.0)) or 0.0),
+                "cost": float(stats.get("avg_cost", base.get("cost", 0.0)) or 0.0),
+            }
+            if weight is not None:
+                snapshot["weight"] = float(weight)
+            return snapshot
 
         if round_number_in_season > 0:
             round_key = int(round_number_in_season)
@@ -475,8 +506,11 @@ class ValidatorSettlementMixin:
                 if prev_best is None or reward_f > prev_best:
                     best_by_miner[uid_i] = reward_f
                     best_round_by_miner[uid_i] = int(round_key)
+                    best_snapshot_by_miner[uid_i] = _snapshot_for_uid(uid_i, reward_f)
                 elif uid_i not in best_round_by_miner:
                     best_round_by_miner[uid_i] = int(round_key)
+                elif uid_i not in best_snapshot_by_miner:
+                    best_snapshot_by_miner[uid_i] = _snapshot_for_uid(uid_i, reward_f)
 
         # Resolve current contender by best season reward.
         best_uid: Optional[int] = None
@@ -514,6 +548,14 @@ class ValidatorSettlementMixin:
             if reigning_reward <= 0.0:
                 reigning_uid = None
         reigning_is_eligible = bool(reigning_uid is not None and reigning_uid in eligible_uids)
+        leader_before_snapshot = None
+        if reigning_uid is not None:
+            current_winner_snapshot = summary_state.get("current_winner_snapshot")
+            if isinstance(current_winner_snapshot, dict) and current_winner_snapshot.get("uid") == reigning_uid:
+                leader_before_snapshot = dict(current_winner_snapshot)
+            else:
+                existing_snapshot = best_snapshot_by_miner.get(reigning_uid) or best_snapshot_by_miner.get(str(reigning_uid))
+                leader_before_snapshot = _snapshot_for_uid(reigning_uid, reigning_reward, fallback=existing_snapshot if isinstance(existing_snapshot, dict) else None)
 
         winner_uid: Optional[int] = None
         winner_reward = 0.0
@@ -542,6 +584,11 @@ class ValidatorSettlementMixin:
         # Keep backward-compatible field used in tests and logs.
         self._last_round_winner_uid = winner_uid
 
+        candidate_snapshot = None
+        if best_uid is not None:
+            existing_snapshot = best_snapshot_by_miner.get(best_uid) or best_snapshot_by_miner.get(str(best_uid))
+            candidate_snapshot = _snapshot_for_uid(best_uid, best_reward, fallback=existing_snapshot if isinstance(existing_snapshot, dict) else None)
+
         round_entry = {
             "winner": {
                 "miner_uid": int(winner_uid) if winner_uid is not None else None,
@@ -567,21 +614,19 @@ class ValidatorSettlementMixin:
         summary_state["required_improvement_pct"] = float(required_improvement_pct)
         summary_state["best_by_miner"] = {int(uid): float(score) for uid, score in best_by_miner.items()}
         summary_state["best_round_by_miner"] = {int(uid): int(rnd) for uid, rnd in best_round_by_miner.items()}
+        summary_state["best_snapshot_by_miner"] = {int(uid): snap for uid, snap in best_snapshot_by_miner.items()}
         summary_state["last_eligible_uids"] = sorted(int(uid) for uid in eligible_uids)
 
-        season_state["rounds"] = rounds_state
-        season_state["summary"] = summary_state
-        season_history[season_key] = season_state
-
-        # Best-effort persistence to disk if implemented by concrete validator.
-        try:
-            persist_fn = getattr(self, "_save_competition_state", None)
-            if callable(persist_fn):
-                persist_fn()
-        except Exception:
-            pass
-
         if (not valid_rewards) or burn_reason:
+            season_state["rounds"] = rounds_state
+            season_state["summary"] = summary_state
+            season_history[season_key] = season_state
+            try:
+                persist_fn = getattr(self, "_save_competition_state", None)
+                if callable(persist_fn):
+                    persist_fn()
+            except Exception:
+                pass
             await self._burn_all(
                 reason=burn_reason or "burn (no rewards)",
             )
@@ -632,6 +677,37 @@ class ValidatorSettlementMixin:
             final_rewards_array[burn_idx] = float(final_rewards_array[burn_idx]) + float(burn_pct)
         bt.logging.info(f"🎯 WEIGHT DISTRIBUTION | Winner UID {winner_uid}: {winner_percentage:.1%} | Burn UID {burn_idx}: {burn_pct:.1%} | BURN_AMOUNT_PERCENTAGE={BURN_AMOUNT_PERCENTAGE}")
         final_rewards_dict = {uid: float(final_rewards_array[uid]) for uid in range(len(final_rewards_array)) if float(final_rewards_array[uid]) > 0.0}
+        leader_after_snapshot = None
+        if winner_uid is not None:
+            existing_snapshot = best_snapshot_by_miner.get(winner_uid) or best_snapshot_by_miner.get(str(winner_uid))
+            leader_after_snapshot = _snapshot_for_uid(
+                int(winner_uid),
+                float(winner_reward),
+                weight=float(final_rewards_dict.get(int(winner_uid), 0.0)),
+                fallback=existing_snapshot if isinstance(existing_snapshot, dict) else None,
+            )
+            summary_state["current_winner_snapshot"] = {k: v for k, v in leader_after_snapshot.items() if k != "weight"}
+        else:
+            summary_state["current_winner_snapshot"] = None
+
+        round_entry["post_consensus_summary"] = {
+            "season": int(season_number),
+            "round": int(round_key),
+            "percentage_to_dethrone": float(required_improvement_pct),
+            "dethroned": bool(dethroned),
+            "leader_before_round": leader_before_snapshot,
+            "candidate_this_round": candidate_snapshot,
+            "leader_after_round": leader_after_snapshot,
+        }
+        season_state["rounds"] = rounds_state
+        season_state["summary"] = summary_state
+        season_history[season_key] = season_state
+        try:
+            persist_fn = getattr(self, "_save_competition_state", None)
+            if callable(persist_fn):
+                persist_fn()
+        except Exception:
+            pass
 
         if not final_rewards_dict:
             self._last_round_winner_uid = None
