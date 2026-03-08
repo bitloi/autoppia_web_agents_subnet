@@ -384,6 +384,24 @@ def _build_consensus_summary_payload(
             reigning_reward = float(round_rewards_for_summary.get(reigning_uid, 0.0) or 0.0)
     reigning_eligible = bool(reigning_uid is not None and reigning_uid in eligible_uid_set)
 
+    challenger_uid: Optional[int] = None
+    challenger_reward = 0.0
+    ranked_uids = sorted(
+        ((uid_i, reward_f) for uid_i, reward_f in ((int(uid), float(reward or 0.0)) for uid, reward in normalized_rewards.items()) if (not eligible_uid_set or uid_i in eligible_uid_set)),
+        key=lambda item: (item[1], -item[0]),
+        reverse=True,
+    )
+    if reigning_uid is not None:
+        for uid_i, reward_f in ranked_uids:
+            if int(uid_i) == int(reigning_uid):
+                continue
+            challenger_uid = int(uid_i)
+            challenger_reward = float(reward_f)
+            break
+    elif ranked_uids:
+        challenger_uid = int(ranked_uids[0][0])
+        challenger_reward = float(ranked_uids[0][1])
+
     winner_uid: Optional[int] = None
     winner_reward = 0.0
     dethroned = False
@@ -393,12 +411,12 @@ def _build_consensus_summary_payload(
     if reigning_uid is not None and reigning_eligible:
         winner_uid = reigning_uid
         winner_reward = reigning_reward
-        if best_uid is not None and best_uid != reigning_uid:
+        if challenger_uid is not None:
             required_reward_to_dethrone = float(reigning_reward * (1.0 + required_improvement_pct))
-            if best_reward > required_reward_to_dethrone:
+            if challenger_reward > required_reward_to_dethrone:
                 dethroned = True
-                winner_uid = best_uid
-                winner_reward = best_reward
+                winner_uid = challenger_uid
+                winner_reward = challenger_reward
     elif best_uid is not None:
         winner_uid = best_uid
         winner_reward = best_reward
@@ -415,8 +433,8 @@ def _build_consensus_summary_payload(
             },
             "miner_rewards": {int(uid): float(reward) for uid, reward in normalized_rewards.items()},
             "decision": {
-                "top_candidate_uid": int(best_uid) if best_uid is not None else None,
-                "top_candidate_reward": float(best_reward),
+                "top_candidate_uid": int(challenger_uid) if challenger_uid is not None else None,
+                "top_candidate_reward": float(challenger_reward),
                 "reigning_uid_before_round": int(reigning_uid) if reigning_uid is not None else None,
                 "reigning_reward_before_round": float(reigning_reward),
                 "reigning_eligible_before_round": bool(reigning_eligible),

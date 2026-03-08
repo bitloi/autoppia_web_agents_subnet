@@ -557,6 +557,28 @@ class ValidatorSettlementMixin:
                 existing_snapshot = best_snapshot_by_miner.get(reigning_uid) or best_snapshot_by_miner.get(str(reigning_uid))
                 leader_before_snapshot = _snapshot_for_uid(reigning_uid, reigning_reward, fallback=existing_snapshot if isinstance(existing_snapshot, dict) else None)
 
+        challenger_uid: Optional[int] = None
+        challenger_reward = 0.0
+        if eligible_uids:
+            ranked_uids = sorted(
+                (int(uid) for uid in eligible_uids),
+                key=lambda uid: (
+                    float(best_by_miner.get(uid, 0.0) or 0.0),
+                    -int(uid),
+                ),
+                reverse=True,
+            )
+            if reigning_uid is not None:
+                for uid_i in ranked_uids:
+                    if int(uid_i) == int(reigning_uid):
+                        continue
+                    challenger_uid = int(uid_i)
+                    challenger_reward = float(best_by_miner.get(uid_i, 0.0) or 0.0)
+                    break
+            elif ranked_uids:
+                challenger_uid = int(ranked_uids[0])
+                challenger_reward = float(best_by_miner.get(challenger_uid, 0.0) or 0.0)
+
         winner_uid: Optional[int] = None
         winner_reward = 0.0
         dethroned = False
@@ -567,16 +589,14 @@ class ValidatorSettlementMixin:
             winner_reward = best_reward
 
             if reigning_is_eligible and reigning_uid is not None and reigning_reward > 0.0:
-                if best_uid != reigning_uid:
+                winner_uid = reigning_uid
+                winner_reward = reigning_reward
+                if challenger_uid is not None:
                     required_reward_to_dethrone = float(reigning_reward * (1.0 + required_improvement_pct))
-                    if best_reward > required_reward_to_dethrone:
+                    if challenger_reward > required_reward_to_dethrone:
                         dethroned = True
-                    else:
-                        winner_uid = reigning_uid
-                        winner_reward = reigning_reward
-                else:
-                    winner_uid = reigning_uid
-                    winner_reward = reigning_reward
+                        winner_uid = challenger_uid
+                        winner_reward = challenger_reward
         elif not eligible_uids:
             winner_uid = None
             winner_reward = 0.0
@@ -585,9 +605,9 @@ class ValidatorSettlementMixin:
         self._last_round_winner_uid = winner_uid
 
         candidate_snapshot = None
-        if best_uid is not None:
-            existing_snapshot = best_snapshot_by_miner.get(best_uid) or best_snapshot_by_miner.get(str(best_uid))
-            candidate_snapshot = _snapshot_for_uid(best_uid, best_reward, fallback=existing_snapshot if isinstance(existing_snapshot, dict) else None)
+        if challenger_uid is not None:
+            existing_snapshot = best_snapshot_by_miner.get(challenger_uid) or best_snapshot_by_miner.get(str(challenger_uid))
+            candidate_snapshot = _snapshot_for_uid(challenger_uid, challenger_reward, fallback=existing_snapshot if isinstance(existing_snapshot, dict) else None)
 
         round_entry = {
             "winner": {
@@ -596,8 +616,8 @@ class ValidatorSettlementMixin:
             },
             "miner_rewards": {int(uid): float(reward) for uid, reward in miner_rewards_for_round.items()},
             "decision": {
-                "top_candidate_uid": int(best_uid) if best_uid is not None else None,
-                "top_candidate_reward": float(best_reward),
+                "top_candidate_uid": int(challenger_uid) if challenger_uid is not None else None,
+                "top_candidate_reward": float(challenger_reward),
                 "reigning_uid_before_round": int(reigning_uid) if reigning_uid is not None else None,
                 "reigning_reward_before_round": float(reigning_reward),
                 "reigning_eligible_before_round": bool(reigning_is_eligible),

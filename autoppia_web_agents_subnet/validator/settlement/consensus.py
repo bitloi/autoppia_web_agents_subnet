@@ -338,9 +338,7 @@ def _build_local_round_summary(
                 leader_before = best_snapshots.get(str(reigning_uid)) or best_snapshots.get(reigning_uid)
         leader_before = _summary_snapshot_from_run(reigning_uid, leader_before)
 
-    candidate_entry = None
-    candidate_run = None
-    best_key = None
+    ranked_candidates: list[tuple[tuple[float, float, float, int], dict[str, Any], dict[str, Any]]] = []
     for miner in miners_payload:
         if not isinstance(miner, dict):
             continue
@@ -355,31 +353,50 @@ def _build_local_round_summary(
         except Exception:
             continue
         key = (reward, score, -avg_time, -uid)
-        if best_key is None or key > best_key:
-            best_key = key
+        ranked_candidates.append((key, miner, best_run))
+
+    ranked_candidates.sort(key=lambda item: item[0], reverse=True)
+
+    top_entry = ranked_candidates[0][1] if ranked_candidates else None
+    top_run = ranked_candidates[0][2] if ranked_candidates else None
+    candidate_entry = None
+    candidate_run = None
+    if reigning_uid is not None:
+        for _key, miner, best_run in ranked_candidates:
+            try:
+                if int(miner.get("uid")) == int(reigning_uid):
+                    continue
+            except Exception:
+                continue
             candidate_entry = miner
             candidate_run = best_run
+            break
+    else:
+        candidate_entry = top_entry
+        candidate_run = top_run
 
     candidate_snapshot = None
     if isinstance(candidate_entry, dict):
         candidate_snapshot = _summary_snapshot_from_run(candidate_entry.get("uid"), candidate_run)
 
-    leader_after = candidate_snapshot
+    top_snapshot = None
+    if isinstance(top_entry, dict):
+        top_snapshot = _summary_snapshot_from_run(top_entry.get("uid"), top_run)
+
+    leader_after = top_snapshot
     dethroned = False
     if leader_before is not None:
         leader_before_reward = float(leader_before.get("reward", 0.0) or 0.0)
         candidate_reward = float(candidate_snapshot.get("reward", 0.0) or 0.0) if candidate_snapshot else 0.0
         if candidate_snapshot is None:
             leader_after = leader_before
-        elif int(candidate_snapshot.get("uid")) != int(leader_before.get("uid")):
+        else:
             threshold = leader_before_reward * (1.0 + percentage_to_dethrone)
             if candidate_reward > threshold:
                 dethroned = True
                 leader_after = candidate_snapshot
             else:
                 leader_after = leader_before
-        else:
-            leader_after = candidate_snapshot
 
     return {
         "season": int(season_number),
