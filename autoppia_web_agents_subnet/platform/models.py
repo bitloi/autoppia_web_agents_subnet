@@ -253,7 +253,7 @@ class FinishRoundAgentRunIWAP:
     tasks_attempted: Optional[int] = None
     tasks_completed: Optional[int] = None
     tasks_failed: Optional[int] = None
-    # Reason for score 0 when applicable (e.g. over_cost_limit, deploy_failed, all_tasks_failed)
+    # Reason for score 0 when applicable (e.g. over_cost_limit, deploy_failed, task_failed)
     zero_reason: Optional[str] = None
 
     def to_payload(self) -> Dict[str, Any]:

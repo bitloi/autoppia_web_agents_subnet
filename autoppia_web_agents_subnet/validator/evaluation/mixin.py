@@ -665,8 +665,10 @@ class ValidatorEvaluationMixin:
                                 )
                                 stop_for_cost_limit_streak = True
 
-                        # zero_reason para IWAP cuando hay timeout (backend usa zero_reason, no metadata.timeout)
-                        zero_reason_task = "task_timeout" if (score_f <= 0.0 and exec_time_s >= task_timeout_sec) else None
+                        # Every zero-reward evaluation must carry a reason for downstream consistency.
+                        zero_reason_task = None
+                        if score_f <= 0.0 or reward <= 0.0:
+                            zero_reason_task = "task_timeout" if exec_time_s >= task_timeout_sec else "task_failed"
                         # Store evaluation data for batch submission
                         batch_eval_data.append(
                             {
@@ -738,7 +740,7 @@ class ValidatorEvaluationMixin:
                     if eval_details and all(score <= 0.0 and exec_time >= task_timeout_sec for score, exec_time in eval_details):
                         zero_reason = "task_timeout"
                     else:
-                        zero_reason = "all_tasks_failed"
+                        zero_reason = "task_failed"
                 else:
                     zero_reason = None
                 _finalize_agent(agent, score=float(avg_reward), zero_reason=zero_reason)
