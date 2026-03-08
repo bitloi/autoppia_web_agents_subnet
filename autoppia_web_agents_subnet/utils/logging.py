@@ -127,9 +127,9 @@ class ColoredLogger:
 
         backup_root = os.getenv("IWAP_BACKUP_DIR")
         base_dir = Path(backup_root) if backup_root else Path("data")
-        log_dir = base_dir / f"season_{season}" / f"round_{round_number}" / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = log_dir / f"{round_id}.log"
+        round_dir = base_dir / f"season_{season}" / f"round_{round_number}"
+        round_dir.mkdir(parents=True, exist_ok=True)
+        log_path = round_dir / "round.log"
 
         handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
         handler.setLevel(logging.DEBUG)

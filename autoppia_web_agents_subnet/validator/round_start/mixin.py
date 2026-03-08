@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import socket
 import time
 from collections import Counter
-from pathlib import Path
 import bittensor as bt
 
 from autoppia_web_agents_subnet.opensource.utils_docker import get_client
@@ -935,52 +933,6 @@ class ValidatorRoundStartMixin:
             f"missing_due_transport={missing_fields_due_transport_count} "
             f"missing_on_200={missing_fields_on_200_count}"
         )
-
-        # Persist detailed handshake diagnostics for post-mortem analysis.
-        try:
-            season_number = int(getattr(getattr(self, "season_manager", None), "season_number", 0) or 0)
-        except Exception:
-            season_number = 0
-        try:
-            round_number = int(getattr(getattr(self, "round_manager", None), "round_number", 0) or 0)
-        except Exception:
-            round_number = 0
-        round_id = str(getattr(self, "current_round_id", "") or f"round_{round_number}")
-        season_label = str(season_number if season_number > 0 else "unknown")
-        round_label = str(round_number if round_number > 0 else "unknown")
-        root_getter = getattr(self, "_state_summary_root", None)
-        base_dir = root_getter() if callable(root_getter) else Path("data")
-        handshake_dir = Path(base_dir) / f"season_{season_label}" / f"round_{round_label}" / "handshake"
-        handshake_dir.mkdir(parents=True, exist_ok=True)
-        handshake_report_path = handshake_dir / f"{round_id}_handshake_diagnostics.json"
-        handshake_payload = {
-            "round_id": round_id,
-            "season_number": season_number,
-            "round_number": round_number,
-            "generated_at_unix": time.time(),
-            "summary": {
-                "total_candidates": len(candidate_uids),
-                "responses_objects_received": responded_count,
-                "no_response": response_missing_count,
-                "valid_payloads": valid_handshake_payload_count,
-                "missing_name": missing_name_count,
-                "missing_github": missing_github_count,
-                "missing_both": missing_both_count,
-                "missing_due_transport": missing_fields_due_transport_count,
-                "missing_on_200": missing_fields_on_200_count,
-                "status_counts": dict(transport_status_counts),
-                "status_message_top10": transport_status_message_counts.most_common(10),
-            },
-            "issues": handshake_issue_rows,
-        }
-        try:
-            handshake_report_path.write_text(
-                json.dumps(handshake_payload, ensure_ascii=True, indent=2),
-                encoding="utf-8",
-            )
-            bt.logging.info(f"[handshake] diagnostics saved: {handshake_report_path}")
-        except Exception as exc:
-            bt.logging.warning(f"[handshake] failed to save diagnostics JSON: {exc}")
 
         # Only miners that responded this round should be treated as "active"
         # for IWAP registration and per-round reporting. Keeping this bounded

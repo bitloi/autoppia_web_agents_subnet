@@ -905,11 +905,6 @@ class IWAPClient:
         round_number_in_season = self._to_int(payload.get("round_number_in_season"))
         return season_number, round_number_in_season
 
-    def _resolve_log_dir(self, season_number: Optional[int], round_number_in_season: Optional[int]) -> Path:
-        season_token = f"season_{season_number}" if season_number is not None else "season_unknown"
-        round_token = f"round_{round_number_in_season}" if round_number_in_season is not None else "round_unknown"
-        return self._backup_dir / season_token / round_token / "logs"
-
     def _backup_payload(
         self,
         context: str,
@@ -917,20 +912,8 @@ class IWAPClient:
         season_number: Optional[int] = None,
         round_number_in_season: Optional[int] = None,
     ) -> None:
-        if not self._backup_dir:
-            return
-        target_dir = self._resolve_log_dir(season_number, round_number_in_season)
-        target_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.utcnow().isoformat().replace(":", "-")
-        filename = f"{timestamp}_{context}.json"
-        target = target_dir / filename
-        try:
-            with target.open("w", encoding="utf-8") as fh:
-                json.dump(_sanitize_json(payload), fh, ensure_ascii=False, indent=2)
-        except Exception:
-            from autoppia_web_agents_subnet.utils.logging import ColoredLogger
-
-            ColoredLogger.warning(f"IWAP | Failed to persist backup payload at {target}")
+        _ = (context, payload, season_number, round_number_in_season)
+        return
 
 
 def build_miner_identity(
