@@ -309,25 +309,6 @@ async def publish_round_snapshot(
                 "current_run": getattr(self, "_current_round_run_payload")(uid),
             }
         )
-    handshake_results_raw = getattr(self, "handshake_results", None) or {}
-    handshake_results: Dict[str, str] = {}
-    eligibility_statuses_raw = getattr(self, "eligibility_status_by_uid", None) or {}
-    eligibility_statuses: Dict[str, str] = {}
-    if isinstance(handshake_results_raw, dict):
-        for uid_raw, status_raw in handshake_results_raw.items():
-            try:
-                uid_key = str(int(uid_raw))
-            except Exception:
-                uid_key = str(uid_raw)
-            handshake_results[uid_key] = str(status_raw)
-    if isinstance(eligibility_statuses_raw, dict):
-        for uid_raw, status_raw in eligibility_statuses_raw.items():
-            try:
-                uid_key = str(int(uid_raw))
-            except Exception:
-                uid_key = str(uid_raw)
-            eligibility_statuses[uid_key] = str(status_raw)
-
     payload = {
         "v": int(consensus_version),
         "s": int(season_number),
@@ -341,8 +322,6 @@ async def publish_round_snapshot(
         "validator_round_id": getattr(self, "current_round_id", None),
         "validator_version": getattr(self, "version", None),
         "miners": miners_payload,
-        "handshake_results": handshake_results,
-        "eligibility_statuses": eligibility_statuses,
     }
 
     try:

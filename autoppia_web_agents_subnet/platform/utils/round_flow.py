@@ -50,18 +50,39 @@ def _eligible_uids_from_downloaded_payloads(raw_payloads: object) -> set[int]:
         payload = payload_entry.get("payload")
         if not isinstance(payload, dict):
             continue
-        eligible.update(_eligible_uids_from_status_map(payload.get("eligibility_statuses")))
-        miner_metrics = payload.get("miner_metrics")
-        if not isinstance(miner_metrics, dict):
-            continue
-        for uid_raw, metric_raw in miner_metrics.items():
-            if not isinstance(metric_raw, dict):
-                continue
-            if metric_raw.get("eligible_this_round") is True or _eligibility_status_is_valid(metric_raw.get("eligibility_status")):
+        miners = payload.get("miners")
+        if isinstance(miners, list):
+            for miner_raw in miners:
+                if not isinstance(miner_raw, dict):
+                    continue
+                uid_raw = miner_raw.get("uid", miner_raw.get("miner_uid"))
                 try:
-                    eligible.add(int(metric_raw.get("miner_uid", uid_raw)))
+                    eligible.add(int(uid_raw))
                 except Exception:
                     continue
+            continue
+
+        miner_metrics = payload.get("miner_metrics")
+        if isinstance(miner_metrics, dict):
+            for uid_raw, metric_raw in miner_metrics.items():
+                if not isinstance(metric_raw, dict):
+                    continue
+                if metric_raw.get("eligible_this_round") is True or _eligibility_status_is_valid(metric_raw.get("eligibility_status")):
+                    try:
+                        eligible.add(int(metric_raw.get("miner_uid", uid_raw)))
+                    except Exception:
+                        continue
+
+        rewards = payload.get("rewards")
+        if not isinstance(rewards, dict):
+            rewards = payload.get("scores")
+        if not isinstance(rewards, dict):
+            continue
+        for uid_raw in rewards.keys():
+            try:
+                eligible.add(int(uid_raw))
+            except Exception:
+                continue
     return eligible
 
 
