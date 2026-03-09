@@ -30,6 +30,7 @@ class ValidatorEvaluationMixin:
         3. Cleanup agents
         """
         current_block = self.block
+        reference_block = int(getattr(self.round_manager, "start_block", current_block) or current_block)
         self.round_manager.enter_phase(
             RoundPhase.EVALUATION,
             block=current_block,
@@ -49,7 +50,7 @@ class ValidatorEvaluationMixin:
         getter = getattr(self.round_manager, "get_round_tasks", None)
         if callable(getter):
             try:
-                res = getter(current_block, self.season_manager)
+                res = getter(reference_block, self.season_manager)
                 if inspect.isawaitable(res):
                     res = await res
                 season_tasks = res
@@ -57,7 +58,7 @@ class ValidatorEvaluationMixin:
                 season_tasks = None
         if not isinstance(season_tasks, list):
             try:
-                res = getattr(self.season_manager, "get_season_tasks")(current_block, self.round_manager)
+                res = getattr(self.season_manager, "get_season_tasks")(reference_block, self.round_manager)
                 if inspect.isawaitable(res):
                     res = await res
                 season_tasks = res

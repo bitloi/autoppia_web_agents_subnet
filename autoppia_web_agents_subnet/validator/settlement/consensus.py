@@ -23,10 +23,19 @@ from autoppia_web_agents_subnet.platform.client import compute_season_number
 
 
 def _safe_season_number(self, current_block: int) -> int:
+    round_id = str(getattr(self, "current_round_id", "") or "")
+    if round_id:
+        m = re.match(r"^validator_round_(\d+)_(\d+)_", round_id)
+        if m:
+            try:
+                return int(m.group(1))
+            except Exception:
+                pass
     try:
         sm = getattr(self, "season_manager", None)
         if sm is not None and hasattr(sm, "get_season_number"):
-            return int(sm.get_season_number(current_block))
+            reference_block = int(getattr(self, "_settlement_round_start_block", 0) or getattr(getattr(self, "round_manager", None), "start_block", 0) or current_block)
+            return int(sm.get_season_number(reference_block))
     except Exception:
         pass
     try:

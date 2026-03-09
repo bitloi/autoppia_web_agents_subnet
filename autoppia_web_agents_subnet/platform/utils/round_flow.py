@@ -264,171 +264,6 @@ def _load_validator_state_json(ctx) -> Optional[Dict[str, Any]]:
         return {"error": str(exc)}
 
 
-def _build_consensus_summary_payload(
-    *,
-    season_number: Optional[int],
-    round_number_in_season: Optional[int],
-    miner_rewards: Dict[int, float],
-    season_history: Dict[Any, Any],
-    eligible_uids: Optional[set[int]] = None,
-) -> Dict[str, Any]:
-    season_i = int(season_number) if season_number is not None else 0
-    round_i = int(round_number_in_season) if round_number_in_season is not None else 0
-    if season_i <= 0:
-        season_i = 0
-    if round_i <= 0:
-        round_i = 0
-
-    try:
-        required_improvement_pct = max(float(validator_config.LAST_WINNER_BONUS_PCT), 0.0)
-    except Exception:
-        required_improvement_pct = 0.0
-
-    normalized_rewards: Dict[int, float] = {}
-    for uid_raw, reward_raw in (miner_rewards or {}).items():
-        try:
-            uid_i = int(uid_raw)
-            reward_f = float(reward_raw)
-        except Exception:
-            continue
-        normalized_rewards[uid_i] = float(reward_f)
-
-    season_state = season_history.get(season_i, {})
-    if not isinstance(season_state, dict):
-        season_state = {}
-
-    summary_state = season_state.get("summary", {})
-    if not isinstance(summary_state, dict):
-        summary_state = {}
-
-    best_by_miner_raw = summary_state.get("best_by_miner", {})
-    if isinstance(best_by_miner_raw, dict):
-        best_by_miner = {}
-        for uid_raw, score_raw in best_by_miner_raw.items():
-            if uid_raw is None:
-                continue
-            try:
-                uid_i = int(uid_raw)
-                score_f = float(score_raw)
-            except Exception:
-                continue
-            best_by_miner[uid_i] = score_f
-    else:
-        best_by_miner = {}
-
-    round_rewards_for_summary: Dict[int, float] = dict(best_by_miner)
-    # Always carry current-round scores into the summary map, even if they are 0.0.
-    # This guarantees post-consensus observability for rounds where all miners score zero.
-    for uid, reward in normalized_rewards.items():
-        prev_best = round_rewards_for_summary.get(uid)
-        if prev_best is None or reward > prev_best:
-            round_rewards_for_summary[uid] = reward
-
-    eligible_uid_set = {int(uid) for uid in (eligible_uids or set())}
-    if not eligible_uid_set:
-        eligible_uid_set = set(round_rewards_for_summary.keys()) or set(normalized_rewards.keys())
-
-    best_uid: Optional[int] = None
-    best_reward = float("-inf")
-    for uid, reward in round_rewards_for_summary.items():
-        try:
-            uid_i = int(uid)
-            reward_f = float(reward)
-        except Exception:
-            continue
-        if eligible_uid_set and uid_i not in eligible_uid_set:
-            continue
-        if reward_f > best_reward or (reward_f == best_reward and best_uid is not None and uid_i < best_uid):
-            best_reward = reward_f
-            best_uid = uid_i
-    if best_reward == float("-inf"):
-        best_reward = 0.0
-
-    reigning_uid_raw = summary_state.get("current_winner_uid")
-    try:
-        reigning_uid: Optional[int] = int(reigning_uid_raw) if reigning_uid_raw is not None else None
-    except Exception:
-        reigning_uid = None
-
-    reigning_reward = 0.0
-    if reigning_uid is not None:
-        try:
-            reigning_reward = float(summary_state.get("current_winner_reward", summary_state.get("current_winner_score", 0.0)) or 0.0)
-        except Exception:
-            reigning_reward = 0.0
-        if reigning_reward <= 0.0:
-            reigning_reward = float(round_rewards_for_summary.get(reigning_uid, 0.0) or 0.0)
-    reigning_eligible = bool(reigning_uid is not None and reigning_uid in eligible_uid_set)
-
-    challenger_uid: Optional[int] = None
-    challenger_reward = 0.0
-    ranked_uids = sorted(
-        ((uid_i, reward_f) for uid_i, reward_f in ((int(uid), float(reward or 0.0)) for uid, reward in normalized_rewards.items()) if (not eligible_uid_set or uid_i in eligible_uid_set)),
-        key=lambda item: (item[1], -item[0]),
-        reverse=True,
-    )
-    if reigning_uid is not None:
-        for uid_i, reward_f in ranked_uids:
-            if int(uid_i) == int(reigning_uid):
-                continue
-            challenger_uid = int(uid_i)
-            challenger_reward = float(reward_f)
-            break
-    elif ranked_uids:
-        challenger_uid = int(ranked_uids[0][0])
-        challenger_reward = float(ranked_uids[0][1])
-
-    winner_uid: Optional[int] = None
-    winner_reward = 0.0
-    dethroned = False
-    required_reward_to_dethrone: Optional[float] = None
-
-    # Keep winner UID explicit when possible, even if score is 0.0.
-    if reigning_uid is not None and reigning_eligible:
-        winner_uid = reigning_uid
-        winner_reward = reigning_reward
-        if challenger_uid is not None:
-            required_reward_to_dethrone = float(reigning_reward * (1.0 + required_improvement_pct))
-            if challenger_reward > required_reward_to_dethrone:
-                dethroned = True
-                winner_uid = challenger_uid
-                winner_reward = challenger_reward
-    elif best_uid is not None:
-        winner_uid = best_uid
-        winner_reward = best_reward
-
-    return {
-        "schema_version": 1,
-        "season_number": season_i,
-        "round_number_in_season": round_i,
-        "saved_at_utc": datetime.utcnow().isoformat(),
-        "round_summary": {
-            "winner": {
-                "miner_uid": int(winner_uid) if winner_uid is not None else None,
-                "reward": float(winner_reward),
-            },
-            "miner_rewards": {int(uid): float(reward) for uid, reward in normalized_rewards.items()},
-            "decision": {
-                "top_candidate_uid": int(challenger_uid) if challenger_uid is not None else None,
-                "top_candidate_reward": float(challenger_reward),
-                "reigning_uid_before_round": int(reigning_uid) if reigning_uid is not None else None,
-                "reigning_reward_before_round": float(reigning_reward),
-                "reigning_eligible_before_round": bool(reigning_eligible),
-                "required_improvement_pct": float(required_improvement_pct),
-                "required_reward_to_dethrone": float(required_reward_to_dethrone) if required_reward_to_dethrone is not None else None,
-                "dethroned": bool(dethroned),
-                "eligible_uids": sorted(int(uid) for uid in eligible_uid_set),
-            },
-        },
-        "season_summary": {
-            "current_winner_uid": int(winner_uid) if winner_uid is not None else None,
-            "current_winner_reward": float(winner_reward),
-            "required_improvement_pct": float(required_improvement_pct),
-            "last_eligible_uids": sorted(int(uid) for uid in eligible_uid_set),
-        },
-    }
-
-
 def _extract_round_summary_v2(*, season_history: Dict[Any, Any], season_number: int, round_number_in_season: int) -> Optional[Dict[str, Any]]:
     season_state = season_history.get(int(season_number), {}) if isinstance(season_history, dict) else {}
     if not isinstance(season_state, dict):
@@ -1244,6 +1079,15 @@ async def finish_round_flow(
     )
     blocks_per_epoch = int(getattr(round_manager, "BLOCKS_PER_EPOCH", 360) if round_manager else 360)
 
+    tasks_total_for_round = 0
+    tasks_completed_for_round = 0
+    for miner_uid in (ctx.current_agent_runs or {}).keys():
+        current_run = getattr(ctx, "_current_round_run_payload")(miner_uid)
+        if not isinstance(current_run, dict):
+            continue
+        tasks_total_for_round += int(current_run.get("tasks_received", 0) or 0)
+        tasks_completed_for_round += int(current_run.get("tasks_success", 0) or 0)
+
     round_metadata = iwa_models.RoundMetadataIWAP(
         round_number=int(round_num or 0),
         started_at=float(getattr(ctx, "round_start_time", ended_at - 3600) or (ended_at - 3600)),
@@ -1252,8 +1096,8 @@ async def finish_round_flow(
         end_block=int(boundaries.get("target_block", 0) or 0),
         start_epoch=float(boundaries.get("round_start_epoch", 0.0) or 0.0),
         end_epoch=float(boundaries.get("target_epoch", 0.0) or 0.0),
-        tasks_total=int(tasks_completed or 0),
-        tasks_completed=int(tasks_completed or 0),
+        tasks_total=int(tasks_total_for_round or 0),
+        tasks_completed=int(tasks_completed_for_round or 0),
         miners_responded_handshake=len(getattr(ctx, "active_miner_uids", []) or []),
         miners_evaluated=len(local_evaluation_miners),
         emission=emission_info,

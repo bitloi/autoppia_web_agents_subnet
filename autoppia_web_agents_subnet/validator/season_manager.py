@@ -65,6 +65,34 @@ class SeasonManager:
         self.season_number = int(idx + 1)
         return int(self.season_number)
 
+    def resolve_season_reference_block(self, current_block: int, round_manager=None) -> int:
+        """
+        Resolve the canonical block that identifies the current round/season.
+
+        We must anchor season math to the round start block, not to the latest
+        chain block seen later in the round. Otherwise tasks/files may roll to
+        the next season while IWAP still persists the round in the previous one.
+        """
+        if round_manager is not None:
+            for attr in ("start_block", "_settlement_round_start_block"):
+                try:
+                    value = getattr(round_manager, attr, None)
+                except Exception:
+                    value = None
+                if value is not None:
+                    try:
+                        return int(value)
+                    except Exception:
+                        pass
+            try:
+                boundaries = round_manager.get_round_boundaries(current_block, log_debug=False)
+                round_start_block = boundaries.get("round_start_block")
+                if round_start_block is not None:
+                    return int(round_start_block)
+            except Exception:
+                pass
+        return int(current_block)
+
     def get_season_start_block(self, current_block: int) -> int:
         """
         Get the starting block of the current season.
@@ -243,11 +271,12 @@ class SeasonManager:
             current_block: Current blockchain block number
             round_manager: RoundManager instance to get round number in season
         """
-        season_number = self.get_season_number(current_block)
+        reference_block = self.resolve_season_reference_block(current_block, round_manager)
+        season_number = self.get_season_number(reference_block)
         round_in_season = 1
         if round_manager is not None:
             try:
-                round_in_season = int(round_manager.get_round_number_in_season(current_block))
+                round_in_season = int(round_manager.get_round_number_in_season(reference_block))
             except Exception:
                 round_in_season = 1
 

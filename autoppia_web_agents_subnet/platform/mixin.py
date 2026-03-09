@@ -97,9 +97,20 @@ class ValidatorPlatformMixin:
         if round_length <= 0:
             raise RuntimeError("round_block_length must be a positive integer")
 
-        # Calculate season and round within season
-        season_number = iwa_main.compute_season_number(current_block)
-        round_number_in_season = iwa_main.compute_round_number_in_season(current_block, round_length)
+        reference_block = current_block
+        try:
+            start_block = getattr(rm, "start_block", None)
+            if start_block is not None:
+                reference_block = int(start_block)
+            else:
+                boundaries = rm.get_round_boundaries(current_block, log_debug=False)
+                reference_block = int(boundaries.get("round_start_block", current_block) or current_block)
+        except Exception:
+            reference_block = current_block
+
+        # Calculate season and round within season using the canonical round start block.
+        season_number = iwa_main.compute_season_number(reference_block)
+        round_number_in_season = iwa_main.compute_round_number_in_season(reference_block, round_length)
 
         return iwa_main.generate_validator_round_id(season_number=season_number, round_number_in_season=round_number_in_season)
 
@@ -398,6 +409,20 @@ class ValidatorPlatformMixin:
             "round": (int(stats["evaluated_round"]) if stats.get("evaluated_round") is not None else None),
         }
 
+    def _current_round_numbers(self) -> Tuple[Optional[int], Optional[int]]:
+        season_number, round_number_in_season = self._extract_round_numbers_from_round_id(getattr(self, "current_round_id", None))
+        if season_number is None:
+            try:
+                season_number = int(getattr(getattr(self, "season_manager", None), "season_number", 0) or 0)
+            except Exception:
+                season_number = None
+        if round_number_in_season is None:
+            try:
+                round_number_in_season = int(getattr(getattr(self, "round_manager", None), "round_number", 0) or 0)
+            except Exception:
+                round_number_in_season = None
+        return season_number, round_number_in_season
+
     def _current_round_run_payload(self, uid: int) -> Optional[Dict[str, Any]]:
         run = (getattr(self, "current_agent_runs", None) or {}).get(uid)
         if run is None:
@@ -420,6 +445,7 @@ class ValidatorPlatformMixin:
             run_meta = getattr(run, "metadata", {}) or {}
             avg_cost = float(run_meta.get("average_cost", 0.0) or 0.0) if isinstance(run_meta, dict) else 0.0
         agent_info = (getattr(self, "agents_dict", None) or {}).get(uid)
+        season_number, round_number_in_season = self._current_round_numbers()
         return {
             "reward": avg_reward,
             "score": avg_score,
@@ -431,8 +457,8 @@ class ValidatorPlatformMixin:
             "github_url": getattr(agent_info, "github_url", None) if agent_info is not None else None,
             "normalized_repo": getattr(agent_info, "normalized_repo", None) if agent_info is not None else None,
             "commit_sha": getattr(agent_info, "git_commit", None) if agent_info is not None else None,
-            "season": int(getattr(getattr(self, "season_manager", None), "season_number", 0) or 0),
-            "round": int(getattr(getattr(self, "round_manager", None), "round_number", 0) or 0),
+            "season": season_number,
+            "round": round_number_in_season,
             "zero_reason": getattr(run, "zero_reason", None),
         }
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import asyncio
+import re
 from typing import Dict, Optional
 
 import bittensor as bt
@@ -379,6 +380,7 @@ class ValidatorSettlementMixin:
 
         # Resolve season/round identifiers for per-season tracking.
         current_block = int(getattr(self, "block", 0) or 0)
+        round_start_block = int(getattr(self, "_settlement_round_start_block", 0) or getattr(getattr(self, "round_manager", None), "start_block", 0) or current_block)
         season_number = 0
         try:
             season_number = int(getattr(getattr(self, "season_manager", None), "season_number", 0) or 0)
@@ -386,9 +388,17 @@ class ValidatorSettlementMixin:
             season_number = 0
         if season_number <= 0:
             try:
+                round_id = str(getattr(self, "current_round_id", "") or "")
+                match = re.match(r"^validator_round_(\d+)_(\d+)_", round_id)
+                if match:
+                    season_number = int(match.group(1))
+            except Exception:
+                season_number = 0
+        if season_number <= 0:
+            try:
                 sm = getattr(self, "season_manager", None)
                 if sm is not None and hasattr(sm, "get_season_number"):
-                    season_number = int(sm.get_season_number(current_block))
+                    season_number = int(sm.get_season_number(round_start_block))
             except Exception:
                 season_number = 0
 
@@ -744,11 +754,13 @@ class ValidatorSettlementMixin:
 
         # Send final results to IWAP
         try:
-            # Count tasks completed (from agents_dict)
+            # Count real task outcomes from the local current runs, not successful miners.
             tasks_completed = 0
-            for agent in self.agents_dict.values():
-                if hasattr(agent, "score") and agent.score > 0:
-                    tasks_completed += 1
+            for miner_uid in getattr(self, "current_agent_runs", {}) or {}:
+                current_run = getattr(self, "_current_round_run_payload")(int(miner_uid))
+                if not isinstance(current_run, dict):
+                    continue
+                tasks_completed += int(current_run.get("tasks_success", 0) or 0)
 
             finish_success = await self._finish_iwap_round(
                 avg_rewards=valid_rewards,

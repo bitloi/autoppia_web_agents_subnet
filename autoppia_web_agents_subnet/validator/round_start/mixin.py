@@ -214,6 +214,11 @@ class ValidatorRoundStartMixin:
         season_start_block = self.season_manager.get_season_start_block(current_block)
         self.round_manager.set_season_start_block(season_start_block)
         self.round_manager.sync_boundaries(current_block)
+        reference_block = int(getattr(self.round_manager, "start_block", season_start_block) or season_start_block)
+        try:
+            self.season_manager.season_number = int(self.season_manager.get_season_number(reference_block))
+        except Exception:
+            pass
         current_fraction = float(self.round_manager.fraction_elapsed(current_block))
 
         if current_fraction > SKIP_ROUND_IF_STARTED_AFTER_FRACTION:
@@ -233,8 +238,8 @@ class ValidatorRoundStartMixin:
                 reason="late in round",
             )
 
-        if self.season_manager.should_start_new_season(current_block):
-            await self.season_manager.generate_season_tasks(current_block, self.round_manager)
+        if self.season_manager.should_start_new_season(reference_block):
+            await self.season_manager.generate_season_tasks(reference_block, self.round_manager)
             while not self.agents_queue.empty():
                 self.agents_queue.get()
             self.agents_dict = {}
