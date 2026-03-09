@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
 import re
+import time
+from typing import Any, Dict, Optional
 
 import bittensor as bt
 from bittensor import AsyncSubtensor  # type: ignore
@@ -503,6 +504,10 @@ async def publish_round_snapshot(
         "miners": miners_payload,
         "summary": local_summary,
     }
+    try:
+        self._ipfs_uploaded_payload = dict(payload)
+    except Exception:
+        pass
 
     try:
         import json
@@ -524,6 +529,11 @@ async def publish_round_snapshot(
         bt.logging.success(ipfs_tag("UPLOAD", f"✅ SUCCESS - CID: {cid}"))
         bt.logging.info(ipfs_tag("UPLOAD", f"Size: {byte_len} bytes | SHA256: {sha_hex[:16]}..."))
         bt.logging.info("=" * 80)
+        try:
+            self._ipfs_upload_cid = str(cid)
+            self._consensus_publish_timestamp = time.time()
+        except Exception:
+            pass
     except Exception as exc:
         bt.logging.error("=" * 80)
         bt.logging.error(ipfs_tag("UPLOAD", f"❌ FAILED | Error: {type(exc).__name__}: {exc}"))

@@ -275,7 +275,23 @@ def _extract_round_summary_v2(*, season_history: Dict[Any, Any], season_number: 
     if not isinstance(round_entry, dict):
         return None
     post_consensus_json = round_entry.get("post_consensus_json")
-    return post_consensus_json if isinstance(post_consensus_json, dict) else None
+    if not isinstance(post_consensus_json, dict):
+        return None
+    summary = post_consensus_json.get("summary")
+    if isinstance(summary, dict):
+        return dict(summary)
+    legacy_summary_keys = {
+        "season",
+        "round",
+        "percentage_to_dethrone",
+        "dethroned",
+        "leader_before_round",
+        "candidate_this_round",
+        "leader_after_round",
+    }
+    if legacy_summary_keys.intersection(post_consensus_json.keys()):
+        return dict(post_consensus_json)
+    return None
 
 
 def _persist_round_summary_file(
@@ -1349,6 +1365,30 @@ async def finish_round_flow(
         # NOTA: post_consensus_evaluation NO se sube a IPFS
         # Se calcula DESPUÉS de descargar todos los IPFS de otros validadores
         # Solo se guarda para enviarlo al backend en finish_round
+        try:
+            season_history = getattr(ctx, "_season_competition_history", None) or {}
+            if isinstance(season_history, dict):
+                season_key = int(season_number_for_summary or 0)
+                round_key = int(round_number_for_summary or 0)
+                season_state = season_history.get(season_key)
+                if not isinstance(season_state, dict):
+                    season_state = {}
+                rounds_state = season_state.get("rounds")
+                if not isinstance(rounds_state, dict):
+                    rounds_state = {}
+                round_entry = rounds_state.get(round_key)
+                if not isinstance(round_entry, dict):
+                    round_entry = {}
+                round_entry["post_consensus_json"] = dict(post_consensus_evaluation)
+                rounds_state[round_key] = round_entry
+                season_state["rounds"] = rounds_state
+                season_history[season_key] = season_state
+                setattr(ctx, "_season_competition_history", season_history)
+                persist_fn = getattr(ctx, "_save_competition_state", None)
+                if callable(persist_fn):
+                    persist_fn()
+        except Exception:
+            bt.logging.warning("IWAP | Could not persist full post_consensus_json into local season history")
 
     # Build ipfs_downloaded with the raw downloaded payloads plus the shared post-consensus object.
     if _downloaded_payloads_raw:

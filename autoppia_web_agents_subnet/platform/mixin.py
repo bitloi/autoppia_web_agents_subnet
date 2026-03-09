@@ -91,9 +91,10 @@ class ValidatorPlatformMixin:
         except Exception:
             season_size_epochs = 0.0
         try:
-            blocks_per_epoch = int(getattr(getattr(self, "round_manager", None), "blocks_per_epoch", 0) or 0)
+            round_manager = getattr(self, "round_manager", None)
+            blocks_per_epoch = int(getattr(round_manager, "BLOCKS_PER_EPOCH", None) or getattr(round_manager, "blocks_per_epoch", None) or 360)
         except Exception:
-            blocks_per_epoch = 0
+            blocks_per_epoch = 360
         try:
             minimum_start_block = int(getattr(validator_config, "MINIMUM_START_BLOCK", 0) or 0)
         except Exception:
