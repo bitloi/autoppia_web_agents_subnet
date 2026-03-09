@@ -978,6 +978,7 @@ async def finish_round_flow(
             "github_url": effective_run.get("github_url"),
             "normalized_repo": effective_run.get("normalized_repo"),
             "commit_sha": effective_run.get("commit_sha"),
+            "evaluation_context": effective_run.get("evaluation_context"),
         }
 
         miner_payload = {
@@ -1254,6 +1255,7 @@ async def finish_round_flow(
             github_url = local_stats.get("github_url")
             normalized_repo = local_stats.get("normalized_repo")
             commit_sha = local_stats.get("commit_sha")
+            evaluation_context = local_stats.get("evaluation_context")
 
             current_stats = current_stats_by_miner.get(miner_uid) or {}
             current_run_consensus = None
@@ -1269,6 +1271,8 @@ async def finish_round_flow(
                     "normalized_repo": normalized_repo,
                     "commit_sha": commit_sha,
                 }
+                if isinstance(evaluation_context, dict):
+                    current_run_consensus["evaluation_context"] = dict(evaluation_context)
 
             post_consensus_miners.append(
                 {
@@ -1291,6 +1295,8 @@ async def finish_round_flow(
                     "current_run_consensus": current_run_consensus,
                 }
             )
+            if isinstance(evaluation_context, dict):
+                post_consensus_miners[-1]["best_run_consensus"]["evaluation_context"] = dict(evaluation_context)
 
         # Add burn_uid if it has weight > 0 but is not in consensus_rewards
         burn_uid = int(BURN_UID)
